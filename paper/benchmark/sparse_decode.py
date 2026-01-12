@@ -18,7 +18,6 @@ import numpy as np
 import torch
 
 import flashinfer
-from benchmarks.bench_trtllm_fmha import page_size
 from flashinfer.testing.utils import (
     bench_gpu_time,
     attention_tflops_per_sec_with_actual_seq_lens,

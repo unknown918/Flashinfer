@@ -1,7 +1,9 @@
 import torch
 from torch import nn
 from typing import Callable, Optional
-from transformers import LlamaForCausalLM
+
+import transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.processing_utils import Unpack
@@ -55,6 +57,7 @@ class SparseAttention(nn.Module):
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
+        # [batch_size, num_heads, seq_len, head_dim]
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
@@ -84,8 +87,22 @@ class SparseAttention(nn.Module):
 
 llama_modeling.LlamaAttention = SparseAttention
 
-model = LlamaForCausalLM.from_pretrained(
-    "../../Llama-3.1-8B-Instruct",
+model_id = "../../Llama-3.1-8B-Instruct"
+
+pipeline = transformers.pipeline(
+    "text-generation",
+    model=model_id,
+    model_kwargs={"dtype": torch.bfloat16},
     device_map="auto",
-    attn_implementation="fa2"
 )
+
+messages = [
+    # {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
+    {"role": "user", "content": "Who are you?"},
+]
+
+outputs = pipeline(
+    messages,
+    max_new_tokens=256,
+)
+print(outputs[0]["generated_text"][-1])

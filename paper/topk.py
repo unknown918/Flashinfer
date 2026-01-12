@@ -4,10 +4,14 @@ from flashinfer.testing import bench_gpu_time
 import numpy as np
 
 torch.manual_seed(42)
-batch_size = 32
-vocab_size = 4096
+
 top_k = 16
-logits = torch.randn(batch_size, vocab_size).half().to(0)
+num_heads = 32
+head_dim = 128
+seq_len = 1024
+
+
+logits = torch.randn(num_heads, seq_len).half().to(0)
 
 radix_topk_overhead = np.median(
     bench_gpu_time(

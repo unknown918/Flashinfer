@@ -56,8 +56,8 @@ def convert_bsr_mask_layout(mask: torch.Tensor, indptr: torch.Tensor) -> torch.T
     MB = len(indptr) - 1
     mask_flashinfer = torch.empty((nnz * R * C,), dtype=mask.dtype, device=mask.device)
     for i in range(MB):
-        mask_flashinfer[indptr[i] * R * C : indptr[i + 1] * R * C] = (
-            mask[indptr[i] : indptr[i + 1]].transpose(0, 1).reshape(-1)
+        mask_flashinfer[indptr[i] * R * C: indptr[i + 1] * R * C] = (
+            mask[indptr[i]: indptr[i + 1]].transpose(0, 1).reshape(-1)
         )
     return mask_flashinfer
 
@@ -108,9 +108,9 @@ class BlockSparseAttentionWrapper:
     """
 
     def __init__(
-        self,
-        float_workspace_buffer: torch.Tensor,
-        backend: str = "auto",
+            self,
+            float_workspace_buffer: torch.Tensor,
+            backend: str = "auto",
     ) -> None:
         r"""Constructs of :class:`BlockSparseAttentionWrapper`.
 
@@ -128,7 +128,7 @@ class BlockSparseAttentionWrapper:
         self._float_workspace_buffer = float_workspace_buffer
         self.device = float_workspace_buffer.device
         self._workspace_size = (
-            float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
         )
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
@@ -168,11 +168,11 @@ class BlockSparseAttentionWrapper:
         self._backend = backend
 
     def reset_workspace_buffer(
-        self,
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        vector_sparse_indices_buffer: Optional[torch.Tensor] = None,
-        vector_sparse_indptr_buffer: Optional[torch.Tensor] = None,
+            self,
+            float_workspace_buffer: torch.Tensor,
+            int_workspace_buffer: torch.Tensor,
+            vector_sparse_indices_buffer: Optional[torch.Tensor] = None,
+            vector_sparse_indptr_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         r"""Reset the workspace buffer.
 
@@ -189,7 +189,7 @@ class BlockSparseAttentionWrapper:
         self._float_workspace_buffer = float_workspace_buffer
         self._int_workspace_buffer = int_workspace_buffer
         self._workspace_size = (
-            float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
         )
         self._pin_memory_int_workspace_buffer = torch.empty(
             self._int_workspace_buffer.shape,
@@ -204,29 +204,29 @@ class BlockSparseAttentionWrapper:
             self._vector_sparse_indptr_buffer = vector_sparse_indptr_buffer
 
     def plan(
-        self,
-        indptr: torch.Tensor,
-        indices: torch.Tensor,
-        M: int,
-        N: int,
-        R: int,
-        C: int,
-        num_qo_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        mask: Optional[torch.Tensor] = None,
-        packed_mask: Optional[torch.Tensor] = None,
-        causal: bool = False,
-        pos_encoding_mode: str = "NONE",
-        use_fp16_qk_reduction: bool = False,
-        logits_soft_cap: Optional[float] = None,
-        sm_scale: Optional[float] = None,
-        rope_scale: Optional[float] = None,
-        rope_theta: Optional[float] = None,
-        q_data_type: Union[str, torch.dtype] = "float16",
-        kv_data_type: Optional[Union[str, torch.dtype]] = None,
-        o_data_type: Union[str, torch.dtype] = "float16",
-        non_blocking: bool = True,
+            self,
+            indptr: torch.Tensor,
+            indices: torch.Tensor,
+            M: int,
+            N: int,
+            R: int,
+            C: int,
+            num_qo_heads: int,
+            num_kv_heads: int,
+            head_dim: int,
+            mask: Optional[torch.Tensor] = None,
+            packed_mask: Optional[torch.Tensor] = None,
+            causal: bool = False,
+            pos_encoding_mode: str = "NONE",
+            use_fp16_qk_reduction: bool = False,
+            logits_soft_cap: Optional[float] = None,
+            sm_scale: Optional[float] = None,
+            rope_scale: Optional[float] = None,
+            rope_theta: Optional[float] = None,
+            q_data_type: Union[str, torch.dtype] = "float16",
+            kv_data_type: Optional[Union[str, torch.dtype]] = None,
+            o_data_type: Union[str, torch.dtype] = "float16",
+            non_blocking: bool = True,
     ) -> None:
         r"""Create auxiliary data structures for block sparse attention.
 
@@ -368,9 +368,9 @@ class BlockSparseAttentionWrapper:
         # be easy to add support for it if needed, leave it as a future work.
         # at this moment, when mask is provided, we use the tensor-core implementation
         if (
-            R * (num_qo_heads // num_kv_heads) < 4
-            and mask_mode != MaskMode.CUSTOM.value
-            and q_data_type not in [torch.float8_e4m3fn, torch.float8_e5m2]
+                R * (num_qo_heads // num_kv_heads) < 4
+                and mask_mode != MaskMode.CUSTOM.value
+                and q_data_type not in [torch.float8_e4m3fn, torch.float8_e5m2]
         ):
             # If the operation is not compute-bound, we use the cuda-core implementation
             self._use_tensor_cores = False
@@ -488,19 +488,19 @@ class BlockSparseAttentionWrapper:
     begin_forward = plan
 
     def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        scale_q: Optional[torch.Tensor] = None,
-        scale_k: Optional[torch.Tensor] = None,
-        scale_v: Optional[torch.Tensor] = None,
-        pos_encoding_mode: str = "NONE",
-        use_fp16_qk_reduction: bool = False,
-        logits_soft_cap: Optional[float] = None,
-        sm_scale: Optional[float] = None,
-        rope_scale: Optional[float] = None,
-        rope_theta: Optional[float] = None,
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            scale_q: Optional[torch.Tensor] = None,
+            scale_k: Optional[torch.Tensor] = None,
+            scale_v: Optional[torch.Tensor] = None,
+            pos_encoding_mode: str = "NONE",
+            use_fp16_qk_reduction: bool = False,
+            logits_soft_cap: Optional[float] = None,
+            sm_scale: Optional[float] = None,
+            rope_scale: Optional[float] = None,
+            rope_theta: Optional[float] = None,
     ) -> torch.Tensor:
         r"""Warning: This method is deprecated, please use :meth:`run` instead."""
         self._pos_encoding_mode = pos_encoding_mode
@@ -512,17 +512,17 @@ class BlockSparseAttentionWrapper:
         return self.run(q, k, v, scale_q, scale_k, scale_v)
 
     def run(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        scale_q: Optional[torch.Tensor] = None,
-        scale_k: Optional[torch.Tensor] = None,
-        scale_v: Optional[torch.Tensor] = None,
-        out: Optional[torch.Tensor] = None,
-        lse: Optional[torch.Tensor] = None,
-        return_lse: bool = False,
-        enable_pdl: Optional[bool] = None,
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            scale_q: Optional[torch.Tensor] = None,
+            scale_k: Optional[torch.Tensor] = None,
+            scale_v: Optional[torch.Tensor] = None,
+            out: Optional[torch.Tensor] = None,
+            lse: Optional[torch.Tensor] = None,
+            return_lse: bool = False,
+            enable_pdl: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         r"""Compute block-sparse attention between Q/K/V tensors.
 
@@ -615,8 +615,8 @@ class BlockSparseAttentionWrapper:
         if self._use_tensor_cores:
             if self._backend == "fa3":
                 if (
-                    self._vector_sparse_indices_buffer.numel()
-                    <= self._paged_kv_indices_buf.numel() * self.C
+                        self._vector_sparse_indices_buffer.numel()
+                        <= self._paged_kv_indices_buf.numel() * self.C
                 ):
                     raise ValueError(
                         "_vector_sparse_indices_buffer is not large enough. Please increase the size."
@@ -736,9 +736,9 @@ class VariableBlockSparseAttentionWrapper:
     """
 
     def __init__(
-        self,
-        float_workspace_buffer: torch.Tensor,
-        backend: str = "auto",
+            self,
+            float_workspace_buffer: torch.Tensor,
+            backend: str = "auto",
     ) -> None:
         r"""Constructs of :class:`VariableBlockSparseAttentionWrapper`.
 
@@ -756,7 +756,7 @@ class VariableBlockSparseAttentionWrapper:
         self._float_workspace_buffer = float_workspace_buffer
         self.device = float_workspace_buffer.device
         self._workspace_size = (
-            float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
         )
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
@@ -787,11 +787,11 @@ class VariableBlockSparseAttentionWrapper:
         self._backend = backend
 
     def reset_workspace_buffer(
-        self,
-        float_workspace_buffer: torch.Tensor,
-        int_workspace_buffer: torch.Tensor,
-        vector_sparse_indices_buffer: Optional[torch.Tensor] = None,
-        vector_sparse_indptr_buffer: Optional[torch.Tensor] = None,
+            self,
+            float_workspace_buffer: torch.Tensor,
+            int_workspace_buffer: torch.Tensor,
+            vector_sparse_indices_buffer: Optional[torch.Tensor] = None,
+            vector_sparse_indptr_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         r"""Reset the workspace buffer.
 
@@ -808,7 +808,7 @@ class VariableBlockSparseAttentionWrapper:
         self._float_workspace_buffer = float_workspace_buffer
         self._int_workspace_buffer = int_workspace_buffer
         self._workspace_size = (
-            float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
         )
         self._pin_memory_int_workspace_buffer = torch.empty(
             self._int_workspace_buffer.shape,
@@ -823,23 +823,23 @@ class VariableBlockSparseAttentionWrapper:
             self._vector_sparse_indptr_buffer = vector_sparse_indptr_buffer
 
     def plan(
-        self,
-        block_mask_map: torch.Tensor,
-        block_row_sz: torch.Tensor,
-        block_col_sz: torch.Tensor,
-        num_qo_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        causal: bool = False,
-        pos_encoding_mode: str = "NONE",
-        use_fp16_qk_reduction: bool = False,
-        logits_soft_cap: Optional[float] = None,
-        sm_scale: Optional[float] = None,
-        rope_scale: Optional[float] = None,
-        rope_theta: Optional[float] = None,
-        non_blocking: bool = True,
-        q_data_type: Union[str, torch.dtype] = "float16",
-        kv_data_type: Optional[Union[str, torch.dtype]] = None,
+            self,
+            block_mask_map: torch.Tensor,
+            block_row_sz: torch.Tensor,
+            block_col_sz: torch.Tensor,
+            num_qo_heads: int,
+            num_kv_heads: int,
+            head_dim: int,
+            causal: bool = False,
+            pos_encoding_mode: str = "NONE",
+            use_fp16_qk_reduction: bool = False,
+            logits_soft_cap: Optional[float] = None,
+            sm_scale: Optional[float] = None,
+            rope_scale: Optional[float] = None,
+            rope_theta: Optional[float] = None,
+            non_blocking: bool = True,
+            q_data_type: Union[str, torch.dtype] = "float16",
+            kv_data_type: Optional[Union[str, torch.dtype]] = None,
     ) -> None:
         r"""Create auxiliary data structures for block sparse attention.
 
@@ -928,8 +928,8 @@ class VariableBlockSparseAttentionWrapper:
         # for customized attention mask for each kv_head
         # NOTE(Yilong): This could be perf bottleneck. Consider Triton implementation.
         def _block_mask_map_to_expanded_indices(
-            block_mask_map: torch.Tensor,  # [H, R, C] bool / {0,1}
-            block_col_sz: torch.Tensor,  # [H, C]     int
+                block_mask_map: torch.Tensor,  # [H, R, C] bool / {0,1}
+                block_col_sz: torch.Tensor,  # [H, C]     int
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             """
             Args:
@@ -954,7 +954,7 @@ class VariableBlockSparseAttentionWrapper:
 
             # 2) Calculate the offset of each column block within its head
             col_offset = (
-                torch.cumsum(block_col_sz.to(dtype_i), 1) - block_col_sz
+                    torch.cumsum(block_col_sz.to(dtype_i), 1) - block_col_sz
             )  # [H,C]
             head_len = block_col_sz.sum(1, dtype=dtype_i)
             head_offset = torch.cumsum(head_len, 0) - head_len
@@ -1042,10 +1042,10 @@ class VariableBlockSparseAttentionWrapper:
                 kv_indptr, non_blocking=non_blocking
             )
         args = [
-            self._float_workspace_buffer, # float_workspace_buffer
-            self._int_workspace_buffer, # int_workspace_buffer
-            self._pin_memory_int_workspace_buffer, # page_locked_int_workspace_buffer
-            kv_indptr_host, # kv_indptr
+            self._float_workspace_buffer,  # float_workspace_buffer
+            self._int_workspace_buffer,  # int_workspace_buffer
+            self._pin_memory_int_workspace_buffer,  # page_locked_int_workspace_buffer
+            kv_indptr_host,  # kv_indptr
             num_kv_heads,  # batch_size
             num_qo_heads // num_kv_heads,  # num_qo_heads (gqa_group_size)
             1,  # num_kv_heads,
@@ -1053,11 +1053,27 @@ class VariableBlockSparseAttentionWrapper:
             False,  # enable_cuda_graph
             -1,  # window_left
             logits_soft_cap,
-            head_dim, # head_dim_qk
-            head_dim, # head_dim_vo
+            head_dim,  # head_dim_qk
+            head_dim,  # head_dim_vo
             torch.empty(0, dtype=q_data_type),
             torch.empty(0, dtype=kv_data_type),
         ]
+
+        # bool enable_cuda_graph; False
+        # bool split_kv; True
+        # int64_t padded_batch_size; 64
+
+        # int buffer
+        # int64_t request_indices_offset; 0
+        # int64_t kv_tile_indices_offset; 256
+        # int64_t o_indptr_offset; 512
+        # int64_t kv_chunk_size_ptr_offset; 772
+        # int64_t block_valid_mask_offset; 784
+
+        # float buffer
+        # int64_t v_offset; 0
+        # int64_t s_offset; 131072
+
         self._plan_info = self._cached_module.plan(
             *args,
         )
@@ -1072,14 +1088,14 @@ class VariableBlockSparseAttentionWrapper:
         self._gqa_group_size = num_qo_heads // num_kv_heads
 
     def run(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        out: Optional[torch.Tensor] = None,
-        lse: Optional[torch.Tensor] = None,
-        return_lse: bool = False,
-        enable_pdl: Optional[bool] = None,
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            out: Optional[torch.Tensor] = None,
+            lse: Optional[torch.Tensor] = None,
+            return_lse: bool = False,
+            enable_pdl: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         r"""Compute block-sparse attention between Q/K/V tensors.
 
@@ -1136,18 +1152,18 @@ class VariableBlockSparseAttentionWrapper:
         # kernel layout is NHD -> [qo_len * num_kv_heads, gqa_group_size, head_dim]
         q = einops.rearrange(
             q,
-            "(num_kv_heads gqa_group_size) qo_len head_dim -> (num_kv_heads qo_len) gqa_group_size head_dim",
+            "(num_kv_heads gqa_group_size) qo_len head_dim -> num_kv_heads (qo_len gqa_group_size) head_dim",
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
 
         k = einops.rearrange(
             k,
-            "num_kv_heads kv_len head_dim -> (num_kv_heads kv_len) 1 1 head_dim",
-        ).contiguous()
+            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+        )
         v = einops.rearrange(
             v,
-            "num_kv_heads kv_len head_dim -> (num_kv_heads kv_len) 1 1 head_dim",
-        ).contiguous()
+            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+        )
 
         stride_block = k.stride(0)
         stride_n = k.stride(1)
@@ -1169,8 +1185,8 @@ class VariableBlockSparseAttentionWrapper:
 
         if self._backend == "fa3":
             if (
-                self._vector_sparse_indices_buffer.numel()
-                <= self._paged_kv_indices_buf.numel()
+                    self._vector_sparse_indices_buffer.numel()
+                    <= self._paged_kv_indices_buf.numel()
             ):
                 raise ValueError(
                     "_vector_sparse_indices_buffer is not large enough. Please increase the buffer size."
@@ -1190,6 +1206,12 @@ class VariableBlockSparseAttentionWrapper:
         else:
             sparse_indices = self._paged_kv_indices_buf
             sparse_indptr = self._paged_kv_indptr_buf
+
+        for i in range(sparse_indices.size(0)):
+            sparse_indices[i] = (sparse_indices[i] // 1024) * 1024 * 128 + sparse_indices[i] % 1024
+        #
+        # for i in range(sparse_indptr.size(0)):
+        #     sparse_indptr[i] = (sparse_indptr[i] // 1024) * 1024 * 128
 
         self._cached_module.run(
             self._float_workspace_buffer,
@@ -1213,10 +1235,9 @@ class VariableBlockSparseAttentionWrapper:
             rope_theta,
         )
 
-        # [qo_len * num_kv_heads, gqa_group_size, head_dim] -> HND
         out = einops.rearrange(
             out,
-            "(num_kv_heads qo_len) gqa_group_size head_dim -> (num_kv_heads gqa_group_size) qo_len head_dim",
+            "num_kv_heads gqa_group_size head_dim -> (num_kv_heads gqa_group_size) head_dim",
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
 

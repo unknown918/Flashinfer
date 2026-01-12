@@ -84,14 +84,25 @@ __device__ __forceinline__ void compute_qk(const DType* smem, const vec_t<float,
 
 template <typename DType, uint32_t num_stages_smem, uint32_t tile_size_per_bdx, uint32_t vec_size,
           uint32_t bdx, uint32_t bdy, uint32_t bdz>
-__global__ void EstimationKernel(DType* q, DType* k, uint32_t seq_len, uint32_t num_qo_heads,
-                                 uint32_t num_kv_heads, DType* out) {
+__global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint32_t num_kv_heads,
+                                 uint32_t seq_len, uint32_t num_pages, uint32_t kv_chunk_size,
+                                 DType* out) {
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
 
   constexpr uint32_t head_dim = bdx * vec_size;
+
+  // uint32_t token_per_block = bdy * tile_size_per_bdx * bdz;
+  // uint32_t kv_chunk_size = bdy * tile_size_per_bdx * bdz;
+  // printf("max_grid_size: %d\n", max_grid_size);
+  // printf("token_per_block: %d\n", token_per_block);
+
+  uint32_t kv_chunk_idx = blockIdx.x;
   uint32_t kv_head_idx = blockIdx.y;
+
   uint32_t qo_head_idx = kv_head_idx * bdy + threadIdx.y;
+  uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
+  uint32_t chunk_end = min(chunk_start + kv_chunk_size, seq_len);
 
   uint32_t kv_stride_h = head_dim;
   uint32_t kv_stride_n = num_kv_heads * head_dim;
@@ -105,8 +116,8 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t seq_len, uint32_t 
   q_vec.cast_load(q + qo_head_idx * head_dim + tx * vec_size);
   block.sync();
 
-  // preload k tiles and v tiles
-  uint32_t producer_kv_idx_base = 0U;
+  // preload k tiles
+  uint32_t producer_kv_idx_base = chunk_start;
   constexpr uint32_t vec_bits = sizeof(DType) * vec_size * 8;
 #pragma unroll
   for (uint32_t iter = 0; iter < num_stages_smem; ++iter) {
@@ -116,24 +127,24 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t seq_len, uint32_t 
               tx * vec_size,
           k + (producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j) * kv_stride_n +
               kv_head_idx * kv_stride_h + tx * vec_size,
-          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < seq_len);
+          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < chunk_end);
     }
     cp_async::commit_group();
     producer_kv_idx_base += bdy * bdz * tile_size_per_bdx;
   }
 
   // pipelining k/v tiles loading and state updating
-  uint32_t consumer_kv_idx_base = 0, stage_idx = 0;
+  uint32_t consumer_kv_idx_base = chunk_start, stage_idx = 0;
 
 #pragma unroll 2
-  for (uint32_t iter = 0; iter < ceil_div(seq_len, tile_size_per_bdx * bdy * bdz); ++iter) {
+  for (uint32_t iter = 0; iter < ceil_div(kv_chunk_size, tile_size_per_bdx * bdy * bdz); ++iter) {
     // compute qk
     cp_async::wait_group<num_stages_smem - 1>();
     block.sync();
     compute_qk<vec_size, bdx, bdy * tile_size_per_bdx, DType>(
         k_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, q_vec,
-        consumer_kv_idx_base, iter * bdy * tile_size_per_bdx * bdz, seq_len,
-        out + seq_len * qo_head_idx, tx, ty, tz);
+        consumer_kv_idx_base, iter * bdy * tile_size_per_bdx * bdz, kv_chunk_size,
+        out + num_pages * qo_head_idx, tx, ty, tz);
     block.sync();
     // load k
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
@@ -142,7 +153,7 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t seq_len, uint32_t 
               tx * vec_size,
           k + (producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j) * kv_stride_n +
               kv_head_idx * kv_stride_h + tx * vec_size,
-          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < seq_len);
+          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < chunk_end);
     }
     cp_async::commit_group();
 
@@ -186,7 +197,7 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
 template <uint32_t HEAD_DIM, typename DType>
 cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __restrict__ out,
                      uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t seq_len,
-                     cudaStream_t stream) {
+                     uint32_t num_pages, cudaStream_t stream) {
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DType), HEAD_DIM / 32UL);
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   auto compute_capacity = GetCudaComputeCapability();
@@ -196,7 +207,7 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
     constexpr uint32_t num_threads =
         std::max(get_heuristic_num_threads(GROUP_SIZE, sizeof(DType)), bdx * bdy);
     constexpr uint32_t bdz = num_threads / (bdx * bdy);
-    constexpr uint32_t tile_size_per_bdx = GROUP_SIZE == 1 ? (sizeof(DType) == 1 ? 2U : 8U) : 2U;
+    constexpr uint32_t tile_size_per_bdx = GROUP_SIZE == 1 ? (sizeof(DType) == 1 ? 2U : 8U) : 1U;
     DISPATCH_COMPUTE_CAP_DECODE_NUM_STAGES_SMEM(compute_capacity, NUM_STAGES_SMEM, {
       const uint32_t smem_size =
           NUM_STAGES_SMEM * bdy * tile_size_per_bdx * bdz * HEAD_DIM * sizeof(DType);
@@ -205,13 +216,25 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
       FLASHINFER_CUDA_CALL(
           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
+      int num_blocks_per_sm = 0;
+      int num_sm = 0;
+      int dev_id = 0;
+      FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+      FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
+      FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+                                                                         num_threads, smem_size));
+
+      uint32_t max_grid_size = uint32_t(num_blocks_per_sm) * uint32_t(num_sm);
+      uint32_t num_chunks = max_grid_size / num_kv_heads;
+      uint32_t kv_chunk_size = ceil_div(seq_len, num_chunks);
+
       // no need to use partition-kv
-      dim3 nblks = dim3(1, num_kv_heads);
+      dim3 nblks = dim3(num_chunks, num_kv_heads);
       dim3 nthrs = dim3(bdx, bdy, bdz);
 
       void* args[] = {
-          (void*)&q,  (void*)&k, (void*)&seq_len, (void*)&num_qo_heads, (void*)&num_kv_heads,
-          (void*)&out};
+          (void*)&q,       (void*)&k,         (void*)&num_qo_heads,  (void*)&num_kv_heads,
+          (void*)&seq_len, (void*)&num_pages, (void*)&kv_chunk_size, (void*)&out};
       FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
       return cudaSuccess;
     });

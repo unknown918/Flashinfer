@@ -34,6 +34,7 @@ from .jit import (
     get_single_decode_uri,
     setup_cubin_loader,
     gen_trtllm_gen_fmha_module,
+    gen_estimate_module
 )
 from .page import get_seq_lens
 from .prefill import (
@@ -347,17 +348,24 @@ def get_batch_decode_mla_module(*args):
     return gen_batch_decode_mla_module(*args).build_and_load()
 
 
+@functools.cache
+def get_decode_estimate_module():
+    return gen_estimate_module().build_and_load()
+
+
 def estimate(
         query: torch.Tensor,
         pooling: torch.Tensor,
-        out: torch.Tensor,
-) -> None:
-    from .jit.estimate import gen_estimate_module
-    gen_estimate_module().build_and_load().estimate(
+        seq_len: int,
+        out: torch.Tensor
+) -> torch.Tensor:
+    get_decode_estimate_module().estimate(
         query,
         pooling,
+        seq_len,
         out
     )
+    return out
 
 
 @overload

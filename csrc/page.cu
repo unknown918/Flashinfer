@@ -21,9 +21,11 @@ using namespace flashinfer;
 
 using tvm::ffi::Tensor;
 
-void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_value, TensorView paged_k_cache,
-                           TensorView paged_v_cache, TensorView kv_indices, TensorView kv_indptr,
-                           TensorView kv_last_page_len, int64_t layout, TensorView pooling) {
+void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_value,
+                                   TensorView paged_k_cache, TensorView paged_v_cache,
+                                   TensorView kv_indices, TensorView kv_indptr,
+                                   TensorView kv_last_page_len, int64_t layout,
+                                   TensorView pooling) {
   CHECK_CONTIGUOUS(pooling)
   CHECK_LAST_DIM_CONTIGUOUS(append_key);
   CHECK_LAST_DIM_CONTIGUOUS(append_value);
@@ -41,7 +43,7 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
   CHECK_DIM(1, kv_indptr);
   CHECK_DIM(1, kv_last_page_len);
   CHECK_DIM(3, pooling);
-  unsigned int seq_len = append_key.size(0);
+  unsigned int seq_len = append_key.size(1);
   unsigned int batch_size = kv_last_page_len.size(0);
   TVM_FFI_ICHECK_EQ(kv_indptr.size(0), batch_size + 1);
   CHECK_DEVICE(append_key, append_key);
@@ -59,9 +61,12 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
   if (kv_layout == QKVLayout::kHND) {
     num_heads = paged_k_cache.size(1);
     page_size = paged_k_cache.size(2);
-  } else {
+  } else if (kv_layout == QKVLayout::kNHD) {
     page_size = paged_k_cache.size(1);
     num_heads = paged_k_cache.size(2);
+  } else if (kv_layout == QKVLayout::kHNND) {
+    num_heads = paged_k_cache.size(0);
+    page_size = paged_k_cache.size(2);
   }
 
   // get kv_cache_strides
@@ -72,15 +77,19 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
       << "k/v strides must be identical";
 
   auto append_k_strides = append_key.strides();
-  auto append_k_stride_n = append_k_strides[0];
-  auto append_k_stride_h = append_k_strides[1];
+  auto append_k_stride_h = append_k_strides[0];
+  auto append_k_stride_n = append_k_strides[1];
   auto append_v_strides = append_value.strides();
-  auto append_v_stride_n = append_v_strides[0];
-  auto append_v_stride_h = append_v_strides[1];
+  auto append_v_stride_h = append_v_strides[0];
+  auto append_v_stride_n = append_v_strides[1];
 
-  TVM_FFI_ICHECK_EQ(append_key.size(1), num_heads);
+  auto pooling_strides = pooling.strides();
+  auto pooling_stride_n = pooling_strides[0];
+  auto pooling_stride_h = pooling_strides[1];
+
+  TVM_FFI_ICHECK_EQ(append_key.size(0), num_heads);
   TVM_FFI_ICHECK_EQ(append_key.size(2), head_dim);
-  TVM_FFI_ICHECK_EQ(append_value.size(1), num_heads);
+  TVM_FFI_ICHECK_EQ(append_value.size(0), num_heads);
   TVM_FFI_ICHECK_EQ(append_value.size(2), head_dim);
 
   cudaSetDevice(append_key.device().device_id);
@@ -92,11 +101,11 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
         static_cast<c_type*>(paged_v_cache.data_ptr()), k_strides.data(),
         static_cast<int32_t*>(kv_indices.data_ptr()), static_cast<int32_t*>(kv_indptr.data_ptr()),
         static_cast<int32_t*>(kv_last_page_len.data_ptr()));
-    cudaError_t status =
-        AppendPagedKVCachePrefill(paged_kv, static_cast<c_type*>(append_key.data_ptr()),
-                           static_cast<c_type*>(append_value.data_ptr()),
-                           static_cast<c_type*>(pooling.data_ptr()), seq_len, append_k_stride_n,
-                           append_k_stride_h, append_v_stride_n, append_v_stride_h, stream);
+    cudaError_t status = AppendPagedKVCachePrefill(
+        paged_kv, static_cast<c_type*>(append_key.data_ptr()),
+        static_cast<c_type*>(append_value.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
+        seq_len, append_k_stride_n, append_k_stride_h, append_v_stride_n, append_v_stride_h,
+        pooling_stride_n, pooling_stride_h, stream);
     TVM_FFI_ICHECK(status == cudaSuccess)
         << "AppendPagedKVCachePrefill failed with error: " << cudaGetErrorString(status);
     return true;
@@ -136,6 +145,10 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
   CHECK_DEVICE(kv_indptr, append_key);
   CHECK_DEVICE(kv_last_page_len, append_key);
 
+  auto pooling_strides = pooling.strides();
+  auto pooling_stride_n = pooling_strides[0];
+  auto pooling_stride_h = pooling_strides[1];
+
   QKVLayout kv_layout = QKVLayout(layout);
 
   unsigned int num_heads, page_size, head_dim;
@@ -143,9 +156,12 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
   if (kv_layout == QKVLayout::kHND) {
     num_heads = paged_k_cache.size(1);
     page_size = paged_k_cache.size(2);
-  } else {
-    page_size = paged_k_cache.size(1);
+  } else if (kv_layout == QKVLayout::kNHD) {
     num_heads = paged_k_cache.size(2);
+    page_size = paged_k_cache.size(1);
+  } else if (kv_layout == QKVLayout::kHNND) {
+    num_heads = paged_k_cache.size(0);
+    page_size = paged_k_cache.size(2);
   }
 
   // get kv_cache_strides
@@ -170,10 +186,10 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
         static_cast<c_type*>(paged_v_cache.data_ptr()), k_strides.data(),
         static_cast<int32_t*>(kv_indices.data_ptr()), static_cast<int32_t*>(kv_indptr.data_ptr()),
         static_cast<int32_t*>(kv_last_page_len.data_ptr()));
-    cudaError_t status =
-        AppendPagedKVCacheDecode(paged_kv, static_cast<c_type*>(append_key.data_ptr()),
-                                 static_cast<c_type*>(append_value.data_ptr()),
-                                 static_cast<c_type*>(pooling.data_ptr()), stream);
+    cudaError_t status = AppendPagedKVCacheDecode(
+        paged_kv, static_cast<c_type*>(append_key.data_ptr()),
+        static_cast<c_type*>(append_value.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
+        pooling_stride_n, pooling_stride_h, stream);
     TVM_FFI_ICHECK(status == cudaSuccess)
         << "AppendPagedKVCacheDecode failed with error: " << cudaGetErrorString(status);
     return true;

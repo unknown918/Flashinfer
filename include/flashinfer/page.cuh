@@ -137,11 +137,17 @@ struct paged_kv_t {
         indptr(indptr),
         last_page_len(last_page_len),
         rope_pos_offset(rope_pos_offset) {
-    stride_page = kv_strides[0];
     this->k_data = k_data;
     this->v_data = v_data;
-    stride_n = layout == QKVLayout::kHND ? kv_strides[2] : kv_strides[1];
-    stride_h = layout == QKVLayout::kHND ? kv_strides[1] : kv_strides[2];
+    if (layout != QKVLayout::kHNND) {
+      stride_page = kv_strides[0];
+      stride_n = layout == QKVLayout::kHND ? kv_strides[2] : kv_strides[1];
+      stride_h = layout == QKVLayout::kHND ? kv_strides[1] : kv_strides[2];
+    } else {
+      stride_page = kv_strides[1];
+      stride_n = kv_strides[2];
+      stride_h = kv_strides[0];
+    }
   }
 
   __host__ __device__ __forceinline__ uint32_t get_length(uint32_t batch_idx) const {
@@ -212,7 +218,6 @@ struct paged_kv_t {
 template <typename DType, size_t vec_size>
 __device__ __forceinline__ void vec_reduct(vec_t<DType, vec_size>& tgt_vec,
                                            vec_t<DType, vec_size>& src_vec) {
-
 #pragma unroll
   for (uint32_t idx = 0; idx < vec_size; idx++) {
     tgt_vec[idx] = __hadd(tgt_vec[idx], src_vec[idx]);
@@ -232,7 +237,8 @@ __device__ __forceinline__ void vec_reduct(vec_t<DType, vec_size>& tgt_vec,
 template <uint32_t head_dim, uint32_t vec_size, typename DType, typename IdType>
 __global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_kv,
                                                DType* __restrict__ key, DType* __restrict__ value,
-                                               DType* pooling) {
+                                               DType* pooling, size_t pooling_stride_n,
+                                               size_t pooling_stride_h) {
   uint32_t tx = threadIdx.x, ty = threadIdx.y;
   uint32_t num_heads = paged_kv.num_heads;
   uint32_t batch_idx = blockIdx.x;
@@ -255,12 +261,13 @@ __global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_k
   if (pooling_entry == 0) {
     local_pool.fill(static_cast<DType>(0.0));
   } else {
-    local_pool.cast_load(pooling + (pooling_iter * num_heads + head_idx) * head_dim +
+    local_pool.cast_load(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h +
                          tx * vec_size);
   }
-  vec_reduct<DType, vec_size>(local_pool, local_k);  // fp8 ???????
+  vec_reduct<DType, vec_size>(local_pool, local_k);
   local_k.cast_store(k_ptr);
-  local_pool.cast_store(pooling + (pooling_iter * num_heads + head_idx) * head_dim + tx * vec_size);
+  local_pool.cast_store(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h +
+                        tx * vec_size);
   vec_t<DType, vec_size>::memcpy(v_ptr, value + head_idx * head_dim + tx * vec_size);
 }
 
@@ -282,8 +289,8 @@ __global__ void AppendPagedKVCachePrefillKernel(paged_kv_t<DType, IdType> paged_
                                                 DType* __restrict__ append_value,
                                                 DType* __restrict__ pooling, uint32_t seq_len,
                                                 size_t append_k_stride_n, size_t append_k_stride_h,
-                                                size_t append_v_stride_n,
-                                                size_t append_v_stride_h) {
+                                                size_t append_v_stride_n, size_t append_v_stride_h,
+                                                size_t pooling_stride_n, size_t pooling_stride_h) {
   uint32_t tx = threadIdx.x, ty = threadIdx.y;
   uint32_t head_idx = blockIdx.x;
   uint32_t stride = blockDim.y;
@@ -292,15 +299,16 @@ __global__ void AppendPagedKVCachePrefillKernel(paged_kv_t<DType, IdType> paged_
   uint32_t sink = 4U;  // sink tokens will cause page shifting
 
   uint32_t page_nums =
-      paged_kv.indptr[1] - static_cast<uint32_t>(paged_kv.last_page_len[0] <= sink);
+      paged_kv.indptr[1] -
+      static_cast<uint32_t>(paged_kv.last_page_len[0] < sink && paged_kv.last_page_len[0] != 0);
 
   if (ty < sink) {
     DType* k_ptr = paged_kv.get_k_ptr(0, head_idx, ty, tx * vec_size);
     DType* v_ptr = paged_kv.get_v_ptr(0, head_idx, ty, tx * vec_size);
     vec_t<DType, vec_size>::memcpy(
         k_ptr, append_key + ty * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
-    vec_t<DType, vec_size>::memcpy(
-        v_ptr, append_key + ty * append_v_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+    vec_t<DType, vec_size>::memcpy(v_ptr, append_value + ty * append_v_stride_n +
+                                              head_idx * append_v_stride_h + tx * vec_size);
   }
 
 #pragma unroll 4
@@ -329,9 +337,9 @@ __global__ void AppendPagedKVCachePrefillKernel(paged_kv_t<DType, IdType> paged_
       vec_t<DType, vec_size> local_k;
       local_k.cast_load(append_key + i_actual * append_k_stride_n + head_idx * append_k_stride_h +
                         tx * vec_size);
-      vec_reduct<DType, vec_size>(local_pool, local_k);  // fp8 ???????
+      vec_reduct<DType, vec_size>(local_pool, local_k);
       local_k.cast_store(k_ptr);
-      local_pool.cast_store(pooling + page_idx * append_k_stride_n + head_idx * append_k_stride_h +
+      local_pool.cast_store(pooling + page_idx * pooling_stride_n + head_idx * pooling_stride_h +
                             tx * vec_size);
     }
   }
@@ -398,7 +406,8 @@ cudaError_t BlockSparseIndicesToVectorSparseOffset(
  */
 template <typename DType, typename IdType>
 cudaError_t AppendPagedKVCacheDecode(paged_kv_t<DType, IdType> paged_kv, DType* key, DType* value,
-                                     DType* pooling, cudaStream_t stream = nullptr) {
+                                     DType* pooling, size_t pooling_stride_n,
+                                     size_t pooling_stride_h, cudaStream_t stream = nullptr) {
   uint32_t head_dim = paged_kv.head_dim;
   uint32_t batch_size = paged_kv.batch_size;
   uint32_t num_heads = paged_kv.num_heads;
@@ -410,7 +419,12 @@ cudaError_t AppendPagedKVCacheDecode(paged_kv_t<DType, IdType> paged_kv, DType* 
     dim3 nblks(batch_size);
     dim3 nthrs(bdx, bdy);
     auto kernel = AppendPagedKVCacheDecodeKernel<HEAD_DIM, vec_size, DType, IdType>;
-    void* args[] = {(void*)&paged_kv, (void*)&key, (void*)&value, (void*)&pooling};
+    void* args[] = {(void*)&paged_kv,
+                    (void*)&key,
+                    (void*)&value,
+                    (void*)&pooling,
+                    (void*)&pooling_stride_n,
+                    (void*)&pooling_stride_h};
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
   });
   return cudaSuccess;
@@ -433,6 +447,7 @@ cudaError_t AppendPagedKVCachePrefill(paged_kv_t<DType, IdType> paged_kv, DType*
                                       DType* append_value, DType* pooling, uint32_t seq_len,
                                       size_t append_k_stride_n, size_t append_k_stride_h,
                                       size_t append_v_stride_n, size_t append_v_stride_h,
+                                      size_t pooling_stride_n, size_t pooling_stride_h,
                                       cudaStream_t stream = nullptr) {
   uint32_t head_dim = paged_kv.head_dim;
   uint32_t num_heads = paged_kv.num_heads;
@@ -451,10 +466,10 @@ cudaError_t AppendPagedKVCachePrefill(paged_kv_t<DType, IdType> paged_kv, DType*
     dim3 nblks(num_heads);
     dim3 nthrs(bdx, bdy);
 
-    void* args[] = {
-        (void*)&paged_kv,          (void*)&append_key,        (void*)&append_value,
-        (void*)&pooling,           (void*)&seq_len,           (void*)&append_k_stride_n,
-        (void*)&append_k_stride_h, (void*)&append_v_stride_n, (void*)&append_v_stride_h};
+    void* args[] = {(void*)&paged_kv,          (void*)&append_key,        (void*)&append_value,
+                    (void*)&pooling,           (void*)&seq_len,           (void*)&append_k_stride_n,
+                    (void*)&append_k_stride_h, (void*)&append_v_stride_n, (void*)&append_v_stride_h,
+                    (void*)&pooling_stride_n,  (void*)&pooling_stride_h};
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
   });
   return cudaSuccess;

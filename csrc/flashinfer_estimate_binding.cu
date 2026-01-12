@@ -17,6 +17,6 @@
 
 using tvm::ffi::Tensor;
 
-void estimate(TensorView q, TensorView pooling, TensorView out);
+void estimate(TensorView q, TensorView pooling, uint32_t seq_len, TensorView out);
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(estimate, estimate);

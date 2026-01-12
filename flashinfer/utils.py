@@ -45,6 +45,7 @@ class MaskMode(Enum):
 class TensorLayout(Enum):
     NHD = 0
     HND = 1
+    HNND = 2
 
 
 log2e = 1.44269504088896340736
@@ -122,7 +123,7 @@ def next_positive_power_of_2(x: int) -> int:
 
 
 def calculate_tile_tokens_dim(
-    num_tokens: int, num_experts: int, top_k: int, max_tile_tokens_dim: int = 128
+        num_tokens: int, num_experts: int, top_k: int, max_tile_tokens_dim: int = 128
 ) -> int:
     # Factor to account for the imbalance of the experts.
     # factor equals to the
@@ -167,8 +168,8 @@ def get_indptr(x: torch.Tensor) -> torch.Tensor:
 
 
 def _unpack_paged_kv_cache(
-    paged_kv_cache: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-    kv_layout: str,
+        paged_kv_cache: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        kv_layout: str,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if isinstance(paged_kv_cache, tuple):
         paged_k_cache, paged_v_cache = paged_kv_cache
@@ -228,7 +229,7 @@ def _get_range_buf(seq_len: int, device: torch.device) -> torch.Tensor:
 
 
 def _get_cache_alibi_slopes_buf(
-    num_qo_heads: int, device: torch.device
+        num_qo_heads: int, device: torch.device
 ) -> torch.Tensor:
     key = (f"alibi_slopes_{num_qo_heads}", device)
     buf = _cache_buf.get(key)
@@ -297,7 +298,7 @@ def get_gpu_memory_bandwidth(device: torch.device) -> float:
 
 
 def _check_cached_qkv_data_type(
-    q: torch.Tensor, k: torch.Tensor, dtype_q: torch.dtype, dtype_kv: torch.dtype
+        q: torch.Tensor, k: torch.Tensor, dtype_q: torch.dtype, dtype_kv: torch.dtype
 ) -> None:
     if q.dtype != dtype_q:
         raise ValueError(
@@ -312,32 +313,33 @@ def _check_cached_qkv_data_type(
 if TorchVersion(torch_version) < TorchVersion("2.4"):
 
     def register_custom_op(
-        name: str,
-        fn: Optional[Callable] = None,
-        /,
-        *,
-        mutates_args: Union[str, Iterable[str]],
-        device_types: Optional[Union[str, Sequence[str]]] = None,
-        schema: Optional[str] = None,
+            name: str,
+            fn: Optional[Callable] = None,
+            /,
+            *,
+            mutates_args: Union[str, Iterable[str]],
+            device_types: Optional[Union[str, Sequence[str]]] = None,
+            schema: Optional[str] = None,
     ) -> Callable:
         return lambda x: x
 
+
     def register_fake_op(
-        name: str,
-        fn: Optional[Callable] = None,
+            name: str,
+            fn: Optional[Callable] = None,
     ) -> Callable:
         return lambda x: x
 
 else:
 
     def register_custom_op(
-        name: str,
-        fn: Optional[Callable] = None,
-        /,
-        *,
-        mutates_args: Union[str, Iterable[str]],
-        device_types: Optional[Union[str, Sequence[str]]] = None,
-        schema: Optional[str] = None,
+            name: str,
+            fn: Optional[Callable] = None,
+            /,
+            *,
+            mutates_args: Union[str, Iterable[str]],
+            device_types: Optional[Union[str, Sequence[str]]] = None,
+            schema: Optional[str] = None,
     ) -> Callable:
         # NOTE(Zihao): torch.library.custom_op has significant overhead as mentioned in the following link
         # https://github.com/vllm-project/vllm/blob/36e76700453924c8d421db99af70a88a1df835cd/vllm/utils.py#L1660-L1674
@@ -351,9 +353,10 @@ else:
         # )
         return lambda x: x
 
+
     def register_fake_op(
-        name: str,
-        fn: Optional[Callable] = None,
+            name: str,
+            fn: Optional[Callable] = None,
     ) -> Callable:
         # return torch.library.register_fake(name, fn)
         return lambda x: x
@@ -368,11 +371,11 @@ def determine_gemm_backend(device: torch.device) -> str:
 
 
 def is_fa3_backend_supported(
-    pos_encoding_mode: int,
-    use_fp16_qk_reductions: bool,
-    use_custom_mask: bool,
-    dtype_q: torch.dtype,
-    dtype_kv: torch.dtype,
+        pos_encoding_mode: int,
+        use_fp16_qk_reductions: bool,
+        use_custom_mask: bool,
+        dtype_q: torch.dtype,
+        dtype_kv: torch.dtype,
 ) -> bool:
     """
     Check if the FA3 backend is supported based on the given parameters.
@@ -407,11 +410,11 @@ def is_fa3_backend_supported(
 
 
 def is_cutlass_backend_supported(
-    pos_encoding_mode: int,
-    use_fp16_qk_reductions: bool,
-    use_custom_mask: bool,
-    dtype_q: torch.dtype,
-    dtype_kv: torch.dtype,
+        pos_encoding_mode: int,
+        use_fp16_qk_reductions: bool,
+        use_custom_mask: bool,
+        dtype_q: torch.dtype,
+        dtype_kv: torch.dtype,
 ) -> bool:
     """
     Check if the cutlass backend is supported based on the given parameters.
@@ -448,12 +451,12 @@ def is_cutlass_backend_supported(
 
 
 def determine_attention_backend(
-    device: torch.device,
-    pos_encoding_mode: int,
-    use_fp16_qk_reductions: bool,
-    use_custom_mask: bool,
-    dtype_q: torch.dtype,
-    dtype_kv: torch.dtype,
+        device: torch.device,
+        pos_encoding_mode: int,
+        use_fp16_qk_reductions: bool,
+        use_custom_mask: bool,
+        dtype_q: torch.dtype,
+        dtype_kv: torch.dtype,
 ) -> str:
     """
     Determine the appropriate attention backend based on the device and parameters.
@@ -481,11 +484,11 @@ def determine_attention_backend(
         The name of the attention backend to be used.
     """
     if is_sm90a_supported(device) and is_fa3_backend_supported(
-        pos_encoding_mode,
-        use_fp16_qk_reductions,
-        use_custom_mask,
-        dtype_q,
-        dtype_kv,
+            pos_encoding_mode,
+            use_fp16_qk_reductions,
+            use_custom_mask,
+            dtype_q,
+            dtype_kv,
     ):
         return "fa3"
     else:
@@ -558,11 +561,11 @@ def determine_mla_backend(device: torch.device) -> str:
 
 
 def check_shape_dtype_device(
-    x: torch.Tensor,
-    expected_shape: Optional[Sequence[int]],
-    expected_dtype: Optional[torch.dtype],
-    expected_device: Optional[torch.device],
-    name: str,
+        x: torch.Tensor,
+        expected_shape: Optional[Sequence[int]],
+        expected_dtype: Optional[torch.dtype],
+        expected_device: Optional[torch.device],
+        name: str,
 ) -> None:
     if expected_shape and x.shape != torch.Size(expected_shape):
         raise ValueError(
@@ -647,11 +650,11 @@ class FP4Tensor:
     """
 
     def __init__(
-        self,
-        data: torch.Tensor,
-        scale: torch.Tensor,
-        scale_start_index: int = 0,
-        original_shape: Optional[Tuple[int, ...]] = None,
+            self,
+            data: torch.Tensor,
+            scale: torch.Tensor,
+            scale_start_index: int = 0,
+            original_shape: Optional[Tuple[int, ...]] = None,
     ):
         """Initialize FP4Tensor.
 
@@ -713,8 +716,8 @@ class FP4Tensor:
 
 # yapf: disable
 srcToDstBlk16RowMap = [
-    0,  8,
-    1,  9,
+    0, 8,
+    1, 9,
     2, 10,
     3, 11,
     4, 12,
@@ -724,8 +727,8 @@ srcToDstBlk16RowMap = [
 ]
 
 srcToDstBlk32RowMap = [
-    0,  8, 16, 24,
-    1,  9, 17, 25,
+    0, 8, 16, 24,
+    1, 9, 17, 25,
     2, 10, 18, 26,
     3, 11, 19, 27,
     4, 12, 20, 28,
@@ -733,6 +736,8 @@ srcToDstBlk32RowMap = [
     6, 14, 22, 30,
     7, 15, 23, 31
 ]
+
+
 # yapf: enable
 
 
@@ -744,7 +749,7 @@ def get_shuffle_block_size(epilogue_tile_m: int) -> int:
 
 
 def get_shuffle_matrix_a_row_indices(
-    input_tensor: torch.Tensor, epilogue_tile_m: int
+        input_tensor: torch.Tensor, epilogue_tile_m: int
 ) -> torch.Tensor:
     """
     Higher-level PyTorch approach to reorder the rows in blocks of size 16 or 32.
@@ -784,7 +789,7 @@ def get_shuffle_matrix_a_row_indices(
 
 
 def get_shuffle_matrix_sf_a_row_indices(
-    input_tensor: torch.Tensor, epilogue_tile_m: int, num_elts_per_sf: int = 16
+        input_tensor: torch.Tensor, epilogue_tile_m: int, num_elts_per_sf: int = 16
 ) -> torch.Tensor:
     assert input_tensor.dtype == torch.uint8
     assert num_elts_per_sf == 16
@@ -895,9 +900,9 @@ def supported_compute_capability(supported_ccs: Iterable[int]) -> Callable:
 
 
 def backend_requirement(
-    backend_checks: Dict[str, Callable],
-    common_check: Optional[Callable] = None,
-    heuristic_func: Optional[Callable] = None,
+        backend_checks: Dict[str, Callable],
+        common_check: Optional[Callable] = None,
+        heuristic_func: Optional[Callable] = None,
 ) -> Callable:
     """
     Decorator to enforce backend and problem size requirements for kernel functions.
@@ -1070,7 +1075,7 @@ def backend_requirement(
                 req_checker = backend_checks[backend]
                 try:
                     if req_checker(
-                        *args, **kwargs
+                            *args, **kwargs
                     ) and req_checker.is_compute_capability_supported(cc):
                         suitable_backends.append(backend)
                 except ValueError:
@@ -1128,7 +1133,7 @@ def backend_requirement(
                 if has_backend_choices():
                     if backend == "auto":
                         if not suitable_auto_backends(
-                            capability, **kwargs_with_defaults
+                                capability, **kwargs_with_defaults
                         ):
                             raise BackendSupportedError(
                                 f"No suitable auto backends found for {func.__name__}"

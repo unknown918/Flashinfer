@@ -65,7 +65,7 @@ inline void CopyToPageLockedBuffer(void* page_locked_int_buffer, int64_t offset,
  * \param max_grid_size The maximum grid size of the kernel
  * \param gdy gridDim.y
  * \param num_pages The number of pages per request in the batch
- * \param max_num_pages_per_batch_lb The pre-set lower bound of maximum number of
+ * \param min_num_pages_per_batch The pre-set lower bound of maximum number of
  *   pages per batch, default to 1
  * \return (max_num_pages_per_batch, new_batch_size) The number of pages per batch and
  *   the new batch size after the partition.
@@ -443,9 +443,12 @@ inline cudaError_t DecodePlan(void* float_buffer, size_t float_workspace_size_in
   padded_batch_size =
       (enable_cuda_graph) ? (split_kv ? max_grid_size / gdy : batch_size) : new_batch_size;
   plan_info.padded_batch_size = padded_batch_size;
+
+  // host
   auto [request_indices_vec, kv_tile_indices_vec, o_indptr_vec] =
       DecodeSplitKVIndptr(indptr_h, batch_size, kv_chunk_size_in_pages);
 
+  // device (only calculate offset, no memcpy)
   AlignedAllocator int_allocator(int_buffer, int_workspace_size_in_bytes);
   plan_info.request_indices_offset = int_allocator.aligned_alloc_offset(
       padded_batch_size * sizeof(IdType), 16, "batch_decode_request_indices");
@@ -455,6 +458,8 @@ inline cudaError_t DecodePlan(void* float_buffer, size_t float_workspace_size_in
       (padded_batch_size + 1) * sizeof(IdType), 16, "batch_decode_o_indptr");
   plan_info.kv_chunk_size_ptr_offset =
       int_allocator.aligned_alloc_offset(sizeof(IdType), 1, "batch_decode_kv_chunk_size_ptr");
+
+  // host
   IdType* request_indices_h =
       GetPtrFromBaseOffset<IdType>(page_locked_int_buffer, plan_info.request_indices_offset);
   IdType* kv_tile_indices_h =
@@ -463,11 +468,14 @@ inline cudaError_t DecodePlan(void* float_buffer, size_t float_workspace_size_in
       GetPtrFromBaseOffset<IdType>(page_locked_int_buffer, plan_info.o_indptr_offset);
   IdType* kv_chunk_size_ptr_h =
       GetPtrFromBaseOffset<IdType>(page_locked_int_buffer, plan_info.kv_chunk_size_ptr_offset);
+
+  // copy data from random address to buffer
   std::copy(request_indices_vec.begin(), request_indices_vec.end(), request_indices_h);
   std::copy(kv_tile_indices_vec.begin(), kv_tile_indices_vec.end(), kv_tile_indices_h);
   std::copy(o_indptr_vec.begin(), o_indptr_vec.end(), o_indptr_h);
   kv_chunk_size_ptr_h[0] = kv_chunk_size_in_pages * page_size;
 
+  // device
   if (split_kv) {
     AlignedAllocator float_allocator(float_buffer, float_workspace_size_in_bytes);
     plan_info.v_offset = float_allocator.aligned_alloc_offset(
