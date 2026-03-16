@@ -148,8 +148,8 @@ void radix_topk_ragged_transform(TensorView input, TensorView output_indices, Te
       << "TopKRaggedTransform failed with error code " << cudaGetErrorString(status);
 }
 
-void radix_topk_mask_logits(TensorView logits, TensorView masked_logits,
-                            TensorView row_states_buffer, int64_t top_k_val) {
+void radix_topk_bool_mask_logits(TensorView logits, TensorView masked_logits,
+                                 TensorView row_states_buffer, int64_t top_k_val) {
   CHECK_INPUT(logits);
   CHECK_INPUT(masked_logits);
   CHECK_DIM(2, logits);         // logits: (batch_size, max_len)
@@ -157,6 +157,7 @@ void radix_topk_mask_logits(TensorView logits, TensorView masked_logits,
 
   uint32_t batch_size = logits.size(0);
   uint32_t vocab_size = logits.size(1);
+  uint32_t row_size = masked_logits.size(1);
 
   cudaSetDevice(logits.device().device_id);
   auto stream = get_stream(logits.device());
@@ -168,19 +169,15 @@ void radix_topk_mask_logits(TensorView logits, TensorView masked_logits,
   row_states_ptr = static_cast<sampling::RadixRowState*>(row_states_buffer.data_ptr());
 
   DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP32_FP16(dtype, c_type, [&] {
-    status = sampling::RadixTopKMaskLogitsMultiCTA<c_type, int32_t>(
-        static_cast<c_type*>(logits.data_ptr()),
-        static_cast<uint8_t*>(masked_logits.data_ptr()),
-        nullptr,
-        batch_size,
-        static_cast<uint32_t>(top_k_val),
-        vocab_size, row_states_ptr, stream
-    );
+    status = sampling::RadixTopKMaskLogitsMultiCTA<c_type, uint32_t>(
+        static_cast<c_type*>(logits.data_ptr()), static_cast<uint8_t*>(masked_logits.data_ptr()),
+        nullptr, batch_size, static_cast<uint32_t>(top_k_val), vocab_size, row_size, row_states_ptr,
+        stream);
     return true;
   });
 
   TVM_FFI_ICHECK(status == cudaSuccess)
-      << "TopKRaggedTransform failed with error code " << cudaGetErrorString(status);
+      << "RadixTopkMaskLogits failed with error code " << cudaGetErrorString(status);
 }
 
 bool can_implement_filtered_topk() { return sampling::CanImplementFilteredTopK(); }

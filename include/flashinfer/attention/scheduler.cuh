@@ -148,7 +148,7 @@ inline auto PrefillBinarySearchKVChunkSize(const bool enable_cuda_graph,
 template <uint32_t GROUP_SIZE, uint32_t HEAD_DIM, PosEncodingMode POS_ENCODING_MODE,
           typename AttentionVariant, typename Params>
 inline cudaError_t BatchDecodeWithPagedKVCacheWorkEstimationDispatched(
-    bool& split_kv, uint32_t& max_grid_size, uint32_t& max_num_pages_per_batch,
+    bool& split_kv, uint32_t& max_grid_size, /*KV Chunk Size*/uint32_t& max_num_pages_per_batch,
     uint32_t& new_batch_size, uint32_t& gdy, uint32_t batch_size,
     typename Params::IdType* kv_indptr_h, const uint32_t num_qo_heads, const uint32_t page_size,
     bool enable_cuda_graph, cudaStream_t stream) {

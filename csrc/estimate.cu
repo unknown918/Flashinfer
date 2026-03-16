@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 by FlashInfer team.
+ * Copyright (c) 2025 by FlashInfer team.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,12 +43,41 @@ void estimate(TensorView q, TensorView pooling, uint32_t seq_len, TensorView out
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
       cudaError_t status = Estimate<HEAD_DIM, c_type>(
           static_cast<c_type*>(q.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
-          static_cast<c_type*>(out.data_ptr()), num_qo_heads, num_kv_heads, seq_len, num_pages, stream);
+          static_cast<c_type*>(out.data_ptr()), num_qo_heads, num_kv_heads, seq_len, num_pages,
+          stream);
       TVM_FFI_ICHECK(status == cudaSuccess)
-          << "Estimation failed with error: " << cudaGetErrorString(status);
+          << "estimation failed with error: " << cudaGetErrorString(status);
       return true;
     });
   });
 
-  TVM_FFI_ICHECK(success) << "Estimation failed to dispatch with dtype " << q.dtype();
+  TVM_FFI_ICHECK(success) << "estimation failed to dispatch with dtype " << q.dtype();
+}
+
+void expand(TensorView mask, TensorView indptr, TensorView indices, uint32_t num_active_pages,
+            uint32_t block_size) {
+  CHECK_CONTIGUOUS(mask)
+  CHECK_CONTIGUOUS(indptr)
+  CHECK_DIM(2, mask);
+  CHECK_DIM(1, indptr);
+  CHECK_DIM(1, indices);
+
+  uint32_t num_qo_heads, num_kv_heads, group_size, max_length;
+
+  num_qo_heads = mask.size(0);
+  num_kv_heads = indptr.size(0) - 1;
+  max_length = mask.size(1);
+  group_size = num_qo_heads / num_kv_heads;
+
+  cudaSetDevice(mask.device().device_id);
+  const cudaStream_t stream = get_stream(mask.device());
+  bool success = DISPATCH_DLPACK_DTYPE_TO_CTYPE(mask.dtype(), d_type, [&] {
+    cudaError_t status = FusedMaskExpansionMultiCTA<d_type, uint32_t>(
+        static_cast<c_type*>(mask.data_ptr()), static_cast<uint32_t*>(indptr.data_ptr()),
+        static_cast<c_type*>(indices.data_ptr()), num_qo_heads, num_kv_heads, group_size,
+        max_length, num_active_blocks, block_size, group_size, stream);
+    TVM_FFI_ICHECK(status == cudaSuccess)
+        << "mask expansion failed with error: " << cudaGetErrorString(status);
+    return true;
+  });
 }

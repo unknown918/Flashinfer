@@ -1059,21 +1059,6 @@ class VariableBlockSparseAttentionWrapper:
             torch.empty(0, dtype=kv_data_type),
         ]
 
-        # bool enable_cuda_graph; False
-        # bool split_kv; True
-        # int64_t padded_batch_size; 64
-
-        # int buffer
-        # int64_t request_indices_offset; 0
-        # int64_t kv_tile_indices_offset; 256
-        # int64_t o_indptr_offset; 512
-        # int64_t kv_chunk_size_ptr_offset; 772
-        # int64_t block_valid_mask_offset; 784
-
-        # float buffer
-        # int64_t v_offset; 0
-        # int64_t s_offset; 131072
-
         self._plan_info = self._cached_module.plan(
             *args,
         )
@@ -1156,14 +1141,15 @@ class VariableBlockSparseAttentionWrapper:
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
 
+        # k and v are allocated to store max_length tokens,non-seq value is set to zero
         k = einops.rearrange(
             k,
             "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
-        )
+        ).contiguous()
         v = einops.rearrange(
             v,
             "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
-        )
+        ).contiguous()
 
         stride_block = k.stride(0)
         stride_n = k.stride(1)
@@ -1204,14 +1190,279 @@ class VariableBlockSparseAttentionWrapper:
             )
             sparse_indptr = self._vector_sparse_indptr_buffer
         else:
-            sparse_indices = self._paged_kv_indices_buf
+            # sparse_indices = self._paged_kv_indices_buf
+            sparse_indices = self._paged_kv_indices_buf // 1024 * 32768 + self._paged_kv_indices_buf % 1024
+            # chunk = len(sparse_indices) // 8
+            # for i in range(8):
+            #     start = i * chunk
+            #     end = (i + 1) * chunk
+            #     sparse_indices[start:end] = sparse_indices[start:end][torch.randperm(chunk)]
+
             sparse_indptr = self._paged_kv_indptr_buf
 
-        for i in range(sparse_indices.size(0)):
-            sparse_indices[i] = (sparse_indices[i] // 1024) * 1024 * 128 + sparse_indices[i] % 1024
-        #
-        # for i in range(sparse_indptr.size(0)):
-        #     sparse_indptr[i] = (sparse_indptr[i] // 1024) * 1024 * 128
+        self._cached_module.run(
+            self._float_workspace_buffer,
+            self._int_workspace_buffer,
+            self._plan_info,
+            q,
+            k,
+            v,
+            sparse_indptr,
+            sparse_indices,
+            self._paged_kv_last_page_len,
+            out,
+            lse,
+            TensorLayout[self._kv_layout].value,
+            -1,  # window_left
+            enable_pdl,
+            None,  # alibi_slopes_buf
+            logits_soft_cap,
+            sm_scale,
+            rope_scale,
+            rope_theta,
+        )
+
+        out = einops.rearrange(
+            out,
+            "num_kv_heads gqa_group_size head_dim -> (num_kv_heads gqa_group_size) head_dim",
+            num_kv_heads=self._num_kv_heads,
+        ).contiguous()
+
+        if return_lse:
+            lse = einops.rearrange(
+                lse,
+                "(num_kv_heads qo_len) gqa_group_size -> (num_kv_heads gqa_group_size) qo_len",
+                num_kv_heads=self._num_kv_heads,
+            ).contiguous()
+
+        return (out, lse) if return_lse else out
+
+
+class SparseSinkAttentionWrapper:
+    def __init__(
+            self,
+            float_workspace_buffer: torch.Tensor,
+            backend: str = "auto",
+    ) -> None:
+        self._float_workspace_buffer = float_workspace_buffer
+        self.device = float_workspace_buffer.device
+        self._workspace_size = (
+                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+        )
+        self._int_workspace_buffer = torch.empty(
+            (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
+        )
+        if backend in ["fa3", "auto"]:
+            self._vector_sparse_indices_buffer = torch.empty(
+                (128 * 1024 * 1024,), dtype=torch.int32, device=self.device
+            )
+            self._vector_sparse_indptr_buffer = torch.empty(
+                (32768,), dtype=torch.int32, device=self.device
+            )
+
+        self._kv_lens_buffer = torch.empty(
+            (32768,), dtype=torch.int32, device=self.device
+        )
+        self._pin_memory_int_workspace_buffer = torch.empty(
+            self._int_workspace_buffer.shape,
+            dtype=torch.uint8,
+            pin_memory=True,
+            device="cpu",
+        )
+        self._use_cuda_graph = False
+        self._kv_layout = "NHD"
+        self._qo_indptr: Optional[torch.Tensor] = None
+        self._paged_kv_indptr_buf: Optional[torch.Tensor] = None
+        self._paged_kv_indices_buf: Optional[torch.Tensor] = None
+        self._paged_kv_last_page_len: Optional[torch.Tensor] = None
+        self._backend = backend
+
+    def reset_workspace_buffer(
+            self,
+            float_workspace_buffer: torch.Tensor,
+            int_workspace_buffer: torch.Tensor,
+            vector_sparse_indices_buffer: Optional[torch.Tensor] = None,
+            vector_sparse_indptr_buffer: Optional[torch.Tensor] = None,
+    ) -> None:
+        r"""Reset the workspace buffer.
+
+        Parameters
+        ----------
+        float_workspace_buffer : torch.Tensor
+            The new float workspace buffer, the device of the new float workspace buffer should
+            be the same as the device of the input tensors.
+
+        int_workspace_buffer : torch.Tensor
+            The new int workspace buffer, the device of the new int workspace buffer should
+            be the same as the device of the input tensors.
+        """
+        self._float_workspace_buffer = float_workspace_buffer
+        self._int_workspace_buffer = int_workspace_buffer
+        self._workspace_size = (
+                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+        )
+        self._pin_memory_int_workspace_buffer = torch.empty(
+            self._int_workspace_buffer.shape,
+            dtype=self._int_workspace_buffer.dtype,
+            pin_memory=True,
+        )
+
+        # Enable user-defined size
+        if vector_sparse_indices_buffer is not None:
+            self._vector_sparse_indices_buffer = vector_sparse_indices_buffer
+        if vector_sparse_indptr_buffer is not None:
+            self._vector_sparse_indptr_buffer = vector_sparse_indptr_buffer
+
+    def plan(
+            self,
+            block_mask: torch.Tensor,
+            block_size: int,
+            max_length: int,
+            num_qo_heads: int,
+            num_kv_heads: int,
+            head_dim: int,
+            causal: bool = False,
+            pos_encoding_mode: str = "NONE",
+            use_fp16_qk_reduction: bool = False,
+            logits_soft_cap: Optional[float] = None,
+            sm_scale: Optional[float] = None,
+            rope_scale: Optional[float] = None,
+            rope_theta: Optional[float] = None,
+            non_blocking: bool = True,
+            q_data_type: Union[str, torch.dtype] = "float16",
+            kv_data_type: Optional[Union[str, torch.dtype]] = None,
+    ) -> None:
+        q_data_type = canonicalize_torch_dtype(q_data_type)
+        if kv_data_type is None:
+            kv_data_type = q_data_type
+        kv_data_type = canonicalize_torch_dtype(kv_data_type)
+        self._o_dtype = q_data_type
+        device = block_mask.device
+
+        if logits_soft_cap is None:
+            logits_soft_cap = 0.0
+
+        # expand mask to indices
+
+        kv_indptr_host = kv_indptr.to("cpu", non_blocking=non_blocking)  # for split-kv binary search
+
+        self._paged_kv_indptr_buf = kv_indptr
+        self._paged_kv_indices_buf = kv_indices
+        self._paged_kv_last_page_len = torch.full(
+            (num_kv_heads,),
+            1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._mask_mode = MaskMode.CAUSAL.value if causal else MaskMode.NON_CAUSAL.value
+
+        # Sanity check
+        assert num_qo_heads % num_kv_heads == 0, ("num_qo_heads must be a multiple of num_kv_heads")
+        assert num_kv_heads == block_mask.shape[0]
+
+        if self._backend == "auto":
+            self._backend = "fa2"
+
+        get_module_args = (
+            q_data_type,
+            kv_data_type,
+            self._o_dtype,
+            kv_indptr_host.dtype,
+            head_dim,  # head_dim_qk
+            head_dim,  # head_dim_vo
+            PosEncodingMode[pos_encoding_mode].value,
+            False,  # use_sliding_window
+            logits_soft_cap > 0,  # use_logits_soft_cap
+        )
+        self._cached_module = get_batch_decode_module(*get_module_args)
+
+        args = [
+            self._float_workspace_buffer,  # float_workspace_buffer
+            self._int_workspace_buffer,  # int_workspace_buffer
+            self._pin_memory_int_workspace_buffer,  # page_locked_int_workspace_buffer
+            kv_indptr_host,  # kv_indptr
+            num_kv_heads,  # batch_size
+            num_qo_heads // num_kv_heads,  # num_qo_heads (group_size)
+            1,  # num_kv_heads,
+            1,  # page_size
+            False,  # enable_cuda_graph
+            -1,  # window_left
+            logits_soft_cap,
+            head_dim,  # head_dim_qk
+            head_dim,  # head_dim_vo
+            torch.empty(0, dtype=q_data_type),
+            torch.empty(0, dtype=kv_data_type),
+        ]
+
+        self._plan_info = self._cached_module.plan(
+            *args,
+        )
+
+        self._pos_encoding_mode = pos_encoding_mode
+        self._use_fp16_qk_reduction = use_fp16_qk_reduction
+        self._logits_soft_cap = logits_soft_cap
+        self._sm_scale = sm_scale
+        self._rope_scale = rope_scale
+        self._rope_theta = rope_theta
+        self._num_kv_heads = num_kv_heads
+        self._gqa_group_size = num_qo_heads // num_kv_heads
+
+    def run(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            out: Optional[torch.Tensor] = None,
+            lse: Optional[torch.Tensor] = None,
+            return_lse: bool = False,
+            enable_pdl: Optional[bool] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import einops
+
+        if enable_pdl is None:
+            enable_pdl = device_support_pdl(q.device)
+
+        pos_encoding_mode = self._pos_encoding_mode
+        logits_soft_cap = self._logits_soft_cap
+        sm_scale = self._sm_scale
+        rope_scale = self._rope_scale
+        rope_theta = self._rope_theta
+        _check_pos_encoding_mode(pos_encoding_mode)
+        if logits_soft_cap is None:
+            logits_soft_cap = 0.0
+        if sm_scale is None:
+            sm_scale = 1.0 / math.sqrt(q.size(-1))
+        if rope_scale is None:
+            rope_scale = 1.0
+        if rope_theta is None:
+            rope_theta = 1e4
+
+        q = einops.rearrange(
+            q,
+            "(num_kv_heads gqa_group_size) qo_len head_dim -> num_kv_heads (qo_len gqa_group_size) head_dim",
+            num_kv_heads=self._num_kv_heads,
+        ).contiguous()
+
+        # k and v are allocated to store max_length tokens,non-seq value is set to zero
+        k = einops.rearrange(
+            k,
+            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+        ).contiguous()
+        v = einops.rearrange(
+            v,
+            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+        ).contiguous()
+
+        if out is None:
+            out = torch.empty_like(q, dtype=self._o_dtype)
+        # sparse_indices = self._paged_kv_indices_buf
+        sparse_indices = self._paged_kv_indices_buf // 1024 * 32768 + self._paged_kv_indices_buf % 1024
+        # chunk = len(sparse_indices) // 8
+        # for i in range(8):
+        #     start = i * chunk
+        #     end = (i + 1) * chunk
+        #     sparse_indices[start:end] = sparse_indices[start:end][torch.randperm(chunk)]
+        sparse_indptr = self._paged_kv_indptr_buf
 
         self._cached_module.run(
             self._float_workspace_buffer,

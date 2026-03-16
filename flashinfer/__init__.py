@@ -19,7 +19,6 @@ import importlib.util
 from .version import __version__ as __version__
 from .version import __git_version__ as __git_version__
 
-
 from . import jit as jit
 from .activation import gelu_and_mul as gelu_and_mul
 from .activation import gelu_tanh_and_mul as gelu_tanh_and_mul
@@ -152,4 +151,8 @@ from .trtllm_low_latency_gemm import (
 from .utils import next_positive_power_of_2 as next_positive_power_of_2
 from .xqa import xqa as xqa
 from .xqa import xqa_mla as xqa_mla
-from .topk import radix_top_k_mask_logits
+from . import topk as topk
+from .topk import top_k as top_k
+from .topk import top_k_page_table_transform as top_k_page_table_transform
+from .topk import top_k_ragged_transform as top_k_ragged_transform
+from .topk import topk_bool_mask_logits as topk_bool_mask_logits

@@ -289,12 +289,16 @@ __device__ __forceinline__ void produce_kv(smem_t<KTraits::SWIZZLE_MODE_KV> smem
 
   if constexpr (KTraits::SWIZZLE_MODE_KV == SwizzleMode::k128B) {
     uint32_t kv_idx = kv_idx_base + warp_idx * 4 + lane_idx / 8;
-    // NOTE: NUM_MMA_KV * 4 / NUM_WARPS_Q = NUM_WARPS_KV * NUM_MMA_KV * 4 / num_warps
+    // NOTE: NUM_WARPS_Q * NUM_WARPS_KV = NUM_WARPS = 4
     static_assert(NUM_MMA_KV * 4 % NUM_WARPS_Q == 0);
 #pragma unroll
+    // iterations = NUM_MMA_KV * 16 / (NUM_WARPS / NUM_WARPS_Q);
     for (uint32_t i = 0; i < NUM_MMA_KV * 4 / NUM_WARPS_Q; ++i) {
 #pragma unroll
-      for (uint32_t j = 0; j < NUM_MMA_D / (8 / sizeof(DTypeKV)); ++j) {
+      uint32_t iterations_h = NUM_MMA_D * 16 * sizeof(DTypeKV) * /*bit per byte*/ 8 /
+                              (/*bit*/ 128 * /*KV_THR_LAYOUT_COL*/ 8);
+      // iterations_h = NUM_MMA_D * sizeof(DTypeKV) / 8;
+      for (uint32_t j = 0; j < iterations_h; ++j) {
         smem.template load_128b_async<fill_mode>(*smem_offset, *gptr, kv_idx < kv_len);
         *smem_offset = smem.template advance_offset_by_column<8>(*smem_offset, j);
         *gptr += 8 * upcast_size<DTypeKV>();
@@ -438,14 +442,16 @@ __device__ __forceinline__ void load_q_global_smem(
         warp_idx_x * KTraits::NUM_MMA_Q * 16 + lane_idx / 8, lane_idx % 8);
 
 #pragma unroll
+    // This loop load a NUM_MMA_Q * 16 * head_dim values
     for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
 #pragma unroll
       for (uint32_t j = 0; j < 2 * 2; ++j) {
-        uint32_t q, r;
+        uint32_t q, r;  // token_idx (within group), group_idx
         group_size.divmod(packed_offset + lane_idx / 8 + mma_q * 16 + j * 4, q, r);
         const uint32_t q_idx = q;
-        DTypeQ* q_ptr =
-            q_ptr_base + q * q_stride_n + r * q_stride_h + (lane_idx % 8) * upcast_size<DTypeQ>();
+        DTypeQ* q_ptr =  // gmem ptr for value idx
+            q_ptr_base + q * q_stride_n + r * q_stride_h +
+            (lane_idx % 8) * upcast_size<DTypeQ>();  // values per 128b
 #pragma unroll
         for (uint32_t mma_do = 0; mma_do < KTraits::NUM_MMA_D_QK / 4; ++mma_do) {
           // load q fragment from gmem to smem
@@ -918,6 +924,8 @@ __device__ __forceinline__ void update_mdo_states(
           m_prev[j] = m[mma_q][j];
 #pragma unroll
           for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
+            // 0, 1, 4, 5
+            // 2, 3, 6, 7
             half2 m_local = __hmax2(*(half2*)&s_frag[mma_q][mma_kv][j * 2],
                                     *(half2*)&s_frag[mma_q][mma_kv][j * 2 + 4]);
             m[mma_q][j] = __hmax(m[mma_q][j], __hmax(m_local.x, m_local.y));
@@ -1410,10 +1418,10 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
 
     // cooperative fetch q fragment from gmem to reg
     const uint32_t qo_packed_idx_base =
-        (bx * NUM_WARPS_Q + get_warp_idx_q<KTraits>(tid.y)) * NUM_MMA_Q * 16;
+        (bx * NUM_WARPS_Q + get_warp_idx_q<KTraits>(tid.y)) * NUM_MMA_Q * 16;  // token_idx
     smem_t<SWIZZLE_MODE_Q> qo_smem(smem_storage.q_smem);
     const uint32_t o_stride_n = num_qo_heads * HEAD_DIM_VO, o_stride_h = HEAD_DIM_VO;
-    DTypeQ* q_ptr_base = q + (kv_head_idx * group_size) * q_stride_h;
+    DTypeQ* q_ptr_base = q + (kv_head_idx * group_size) * q_stride_h;  // this group's start in gmem
     DTypeO* o_ptr_base = partition_kv
                              ? o + chunk_idx * o_stride_n + (kv_head_idx * group_size) * o_stride_h
                              : o + (kv_head_idx * group_size) * o_stride_h;
@@ -1434,6 +1442,7 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
 
     smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage.k_smem), v_smem(smem_storage.v_smem);
 
+    // dim3 nblks(ceil_div(qo_len * group_size, CTA_TILE_Q), num_chunks, num_kv_heads);
     const uint32_t num_iterations = ceil_div(
         MASK_MODE == MaskMode::kCausal
             ? min(chunk_size,
@@ -1463,19 +1472,24 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
         v +
         (chunk_start + warp_idx * KV_THR_LAYOUT_ROW + lane_idx / KV_THR_LAYOUT_COL) * v_stride_n +
         kv_head_idx * v_stride_h + (lane_idx % KV_THR_LAYOUT_COL) * upcast_size<DTypeKV>();
+    // static constexpr uint32_t KV_THR_LAYOUT_ROW = SWIZZLE_MODE_KV == SwizzleMode::k128B ? 4 : 8;
+    // static constexpr uint32_t KV_THR_LAYOUT_COL = SWIZZLE_MODE_KV == SwizzleMode::k128B ? 8 : 4;
+    uint32_t k_smem_offset_w = k_smem.template get_permuted_offset<UPCAST_STRIDE_K>(
+                 warp_idx * KV_THR_LAYOUT_ROW + lane_idx / KV_THR_LAYOUT_COL,
+                 lane_idx % KV_THR_LAYOUT_COL),  // gmem -> smem + swizzle
 
-    uint32_t k_smem_offset_r = k_smem.template get_permuted_offset<UPCAST_STRIDE_K>(
+        v_smem_offset_w = v_smem.template get_permuted_offset<UPCAST_STRIDE_V>(
+            warp_idx * KV_THR_LAYOUT_ROW + lane_idx / KV_THR_LAYOUT_COL,
+            lane_idx % KV_THR_LAYOUT_COL),
+
+        k_smem_offset_r = k_smem.template get_permuted_offset<UPCAST_STRIDE_K>(
                  get_warp_idx_kv<KTraits>(tid.z) * NUM_MMA_KV * 16 + 8 * (lane_idx / 16) +
                      lane_idx % 8,
-                 (lane_idx % 16) / 8),
-             v_smem_offset_r = v_smem.template get_permuted_offset<UPCAST_STRIDE_V>(
-                 get_warp_idx_kv<KTraits>(tid.z) * NUM_MMA_KV * 16 + lane_idx % 16, lane_idx / 16),
-             k_smem_offset_w = k_smem.template get_permuted_offset<UPCAST_STRIDE_K>(
-                 warp_idx * KV_THR_LAYOUT_ROW + lane_idx / KV_THR_LAYOUT_COL,
-                 lane_idx % KV_THR_LAYOUT_COL),
-             v_smem_offset_w = v_smem.template get_permuted_offset<UPCAST_STRIDE_V>(
-                 warp_idx * KV_THR_LAYOUT_ROW + lane_idx / KV_THR_LAYOUT_COL,
-                 lane_idx % KV_THR_LAYOUT_COL);
+                 (lane_idx % 16) / 8),  // smem -> reg + transpose
+
+        v_smem_offset_r = v_smem.template get_permuted_offset<UPCAST_STRIDE_V>(
+            get_warp_idx_kv<KTraits>(tid.z) * NUM_MMA_KV * 16 + lane_idx % 16, lane_idx / 16);
+
     produce_kv<false, SharedMemFillMode::kNoFill, KTraits>(k_smem, &k_smem_offset_w, &k_ptr,
                                                            k_stride_n, 0, chunk_size, tid);
     cp_async::commit_group();
@@ -1607,6 +1621,26 @@ cudaError_t SinglePrefillWithKVCacheDispatched(Params params, typename Params::D
   constexpr uint32_t NUM_MMA_D_QK = HEAD_DIM_QK / 16;
   constexpr uint32_t NUM_MMA_D_VO = HEAD_DIM_VO / 16;
   int64_t packed_qo_len = qo_len * group_size;
+  // inline uint32_t FA2DetermineCtaTileQ(int64_t avg_packed_qo_len, uint32_t head_dim) {
+  //   if (avg_packed_qo_len > 64 && head_dim < 256) {
+  //     return 128;
+  //   } else {
+  //     auto compute_capacity = GetCudaComputeCapability();
+  //     if (compute_capacity.first >= 8) {
+  //       // Ampere or newer
+  //       if (avg_packed_qo_len > 16) {
+  //         // avg_packed_qo_len <= 64
+  //         return 64;
+  //       } else {
+  //         // avg_packed_qo_len <= 16
+  //         return 16;
+  //       }
+  //     } else {
+  //       // NOTE(Zihao): not enough shared memory on Turing for 1x4 warp layout
+  //       return 64;
+  //     }
+  //   }
+  // }
   uint32_t cta_tile_q = FA2DetermineCtaTileQ(packed_qo_len, HEAD_DIM_VO);
 
   DISPATCH_CTA_TILE_Q(cta_tile_q, CTA_TILE_Q, {
@@ -1635,10 +1669,10 @@ cudaError_t SinglePrefillWithKVCacheDispatched(Params params, typename Params::D
         (HEAD_DIM_VO >= 128 && NUM_MMA_Q == 2 && POS_ENCODING_MODE == PosEncodingMode::kRoPELlama &&
          !USE_FP16_QK_REDUCTION)
             ? 2
-            : (8 / NUM_MMA_Q);
+            : (8 / NUM_MMA_Q);  // register constraints
     const uint32_t max_num_mma_kv_smem =
         (max_smem_per_threadblock - CTA_TILE_Q * HEAD_DIM_QK * sizeof(DTypeQ)) /
-        ((HEAD_DIM_QK + HEAD_DIM_VO) * 16 * NUM_WARPS_KV * sizeof(DTypeKV));
+        ((HEAD_DIM_QK + HEAD_DIM_VO) * 16 * NUM_WARPS_KV * sizeof(DTypeKV));  // smem constraints
 
     // control NUM_MMA_KV for maximum warp occupancy
     DISPATCH_NUM_MMA_KV(min(max_num_mma_kv_smem, max_num_mma_kv_reg), NUM_MMA_KV, {
@@ -1682,6 +1716,7 @@ cudaError_t SinglePrefillWithKVCacheDispatched(Params params, typename Params::D
           // Enough parallelism, do not split-kv
           params.partition_kv = false;
           void* args[] = {(void*)&params};
+          // one CTA process all kv
           dim3 nblks(ceil_div(qo_len * group_size, CTA_TILE_Q), 1, num_kv_heads);
           dim3 nthrs(32, NUM_WARPS_Q, NUM_WARPS_KV);
           FLASHINFER_CUDA_CALL(
@@ -1695,6 +1730,7 @@ cudaError_t SinglePrefillWithKVCacheDispatched(Params params, typename Params::D
           params.o = tmp;
           params.lse = tmp_lse;
           void* args[] = {(void*)&params};
+          // one CTA process a chunk of kv
           dim3 nblks(ceil_div(qo_len * group_size, CTA_TILE_Q), num_chunks, num_kv_heads);
           dim3 nthrs(32, NUM_WARPS_Q, NUM_WARPS_KV);
 

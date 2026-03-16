@@ -1,19 +1,3 @@
-"""
-Copyright (c) 2024 by FlashInfer team.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-  http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
 import numpy as np
 import torch
 
@@ -32,7 +16,7 @@ num_qo_heads = 32
 
 budget = 4096
 seq_len = 1024
-max_length = 131072
+max_length = 32768
 
 num_blocks_row = 1
 num_blocks_col = int(seq_len / page_size)
@@ -105,6 +89,22 @@ wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
     float_workspace_buffer, backend="fa2"
 )
 
+plan_overhead = np.median(
+    bench_gpu_time(
+        lambda: wrapper.plan(
+            block_mask_map=block_mask_map,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            q_data_type=torch.half,
+        ),
+        dry_run_time_ms=100,
+        repeat_time_ms=1000,
+    )
+)
+
 wrapper.plan(
     block_mask_map=block_mask_map,
     block_row_sz=block_row_sz,
@@ -115,10 +115,35 @@ wrapper.plan(
     q_data_type=torch.half,
 )
 
+run_overhead = np.median(
+    bench_gpu_time(
+        lambda: wrapper.run(
+            q.unsqueeze(1),
+            paged_kv_cache[0],
+            paged_kv_cache[1]
+        ),
+        dry_run_time_ms=100,
+        repeat_time_ms=1000,
+    )
+)
+
 out = wrapper.run(
     q.unsqueeze(1),
     paged_kv_cache[0],
     paged_kv_cache[1]
+)
+
+ref_overhead = np.median(
+    bench_gpu_time(
+        lambda: flashinfer.single_decode_with_kv_cache(
+            q,
+            k,
+            v,
+            kv_layout="HND"
+        ),
+        dry_run_time_ms=100,
+        repeat_time_ms=1000,
+    )
 )
 
 ref = flashinfer.single_decode_with_kv_cache(
@@ -127,4 +152,7 @@ ref = flashinfer.single_decode_with_kv_cache(
 
 assert_close(ref, out)
 
-print(f"Append KV Cache Overhead: {append_page_prefill_overhead:.3f}")
+print(f"Append KV Cache Overhead: {append_page_prefill_overhead:.3f} ms")
+print(f"Decode Plan Overhead: {plan_overhead:.3f} ms")
+print(f"Sparse Decode Overhead: {run_overhead:.3f} ms")
+print(f"Ref Decode Overhead: {ref_overhead:.3f} ms")
