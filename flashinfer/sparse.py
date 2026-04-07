@@ -761,13 +761,6 @@ class VariableBlockSparseAttentionWrapper:
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
         )
-        if backend in ["fa3", "auto"]:
-            self._vector_sparse_indices_buffer = torch.empty(
-                (128 * 1024 * 1024,), dtype=torch.int32, device=self.device
-            )
-            self._vector_sparse_indptr_buffer = torch.empty(
-                (32768,), dtype=torch.int32, device=self.device
-            )
 
         self._kv_lens_buffer = torch.empty(
             (32768,), dtype=torch.int32, device=self.device
@@ -790,8 +783,6 @@ class VariableBlockSparseAttentionWrapper:
             self,
             float_workspace_buffer: torch.Tensor,
             int_workspace_buffer: torch.Tensor,
-            vector_sparse_indices_buffer: Optional[torch.Tensor] = None,
-            vector_sparse_indptr_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         r"""Reset the workspace buffer.
 
@@ -815,12 +806,6 @@ class VariableBlockSparseAttentionWrapper:
             dtype=self._int_workspace_buffer.dtype,
             pin_memory=True,
         )
-
-        # Enable user-defined size
-        if vector_sparse_indices_buffer is not None:
-            self._vector_sparse_indices_buffer = vector_sparse_indices_buffer
-        if vector_sparse_indptr_buffer is not None:
-            self._vector_sparse_indptr_buffer = vector_sparse_indptr_buffer
 
     def plan(
             self,
@@ -1025,40 +1010,42 @@ class VariableBlockSparseAttentionWrapper:
             PosEncodingMode[pos_encoding_mode].value,
             False,  # use_sliding_window
             logits_soft_cap > 0,  # use_logits_soft_cap
+            use_fp16_qk_reduction,
         )
-        self._cached_module = get_batch_decode_module(*get_module_args)
+        self._cached_module = get_batch_prefill_module(self._backend, *get_module_args)
 
         kv_lens_arr_host = kv_indptr_host[1:] - kv_indptr_host[:-1]  # page_size == 1
-        self._kv_lens_buffer[: len(kv_lens_arr_host)].copy_(
+        required_size = len(kv_lens_arr_host)
+        if required_size > self._kv_lens_buffer.shape[0]:
+            self._kv_lens_buffer = torch.empty(
+                (required_size,), dtype=torch.int32, device=self.device
+            )
+        self._kv_lens_buffer[:required_size].copy_(
             kv_lens_arr_host,
         )
 
-        if self._backend == "fa3":
-            if self._vector_sparse_indptr_buffer.numel() <= kv_indptr.numel():
-                raise ValueError(
-                    "_vector_sparse_indptr_buffer is not large enough. Please increase the buffer size."
-                )
-            self._vector_sparse_indptr_buffer[: len(kv_indptr)].copy_(
-                kv_indptr, non_blocking=non_blocking
-            )
         args = [
-            self._float_workspace_buffer,  # float_workspace_buffer
-            self._int_workspace_buffer,  # int_workspace_buffer
-            self._pin_memory_int_workspace_buffer,  # page_locked_int_workspace_buffer
-            kv_indptr_host,  # kv_indptr
-            num_kv_heads,  # batch_size
+            self._float_workspace_buffer,
+            self._int_workspace_buffer,
+            self._pin_memory_int_workspace_buffer,
+            qo_indptr_host,
+            kv_indptr_host,
+            kv_lens_arr_host,
+            qo_indptr_host[-1].item(),  # total_num_rows
+            num_blocks_row * num_kv_heads,  # batch_size
             num_qo_heads // num_kv_heads,  # num_qo_heads (gqa_group_size)
             1,  # num_kv_heads,
             1,  # page_size
-            False,  # enable_cuda_graph
+            False,  # is_cuda_graph_enabled,
+            head_dim,
+            head_dim,
+            causal,
             -1,  # window_left
-            logits_soft_cap,
-            head_dim,  # head_dim_qk
-            head_dim,  # head_dim_vo
-            torch.empty(0, dtype=q_data_type),
-            torch.empty(0, dtype=kv_data_type),
         ]
-
+        if self._backend == "fa2":
+            args.append(-1)  # fixed_split_size
+            args.append(False)  # disable_split_kv
+            args.append(0)  # num_colocated_ctas
         self._plan_info = self._cached_module.plan(
             *args,
         )
@@ -1071,6 +1058,27 @@ class VariableBlockSparseAttentionWrapper:
         self._rope_theta = rope_theta
         self._num_kv_heads = num_kv_heads
         self._gqa_group_size = num_qo_heads // num_kv_heads
+
+    def forward(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            pos_encoding_mode: str = "NONE",
+            use_fp16_qk_reduction: bool = False,
+            logits_soft_cap: Optional[float] = None,
+            sm_scale: Optional[float] = None,
+            rope_scale: Optional[float] = None,
+            rope_theta: Optional[float] = None,
+    ) -> torch.Tensor:
+        r"""Warning: This method is deprecated, please use :meth:`run` instead."""
+        self._pos_encoding_mode = pos_encoding_mode
+        self._use_fp16_qk_reduction = use_fp16_qk_reduction
+        self._logits_soft_cap = logits_soft_cap
+        self._sm_scale = sm_scale
+        self._rope_scale = rope_scale
+        self._rope_theta = rope_theta
+        return self.run(q, k, v)
 
     def run(
             self,
@@ -1137,22 +1145,18 @@ class VariableBlockSparseAttentionWrapper:
         # kernel layout is NHD -> [qo_len * num_kv_heads, gqa_group_size, head_dim]
         q = einops.rearrange(
             q,
-            "(num_kv_heads gqa_group_size) qo_len head_dim -> num_kv_heads (qo_len gqa_group_size) head_dim",
+            "(num_kv_heads gqa_group_size) qo_len head_dim -> (num_kv_heads qo_len) gqa_group_size head_dim",
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
-
-        # k and v are allocated to store max_length tokens,non-seq value is set to zero
+        # HND -> [kv_len * num_kv_heads (num_pages), 1 (page_size), 1 (new_num_kv_heads), head_dim]
         k = einops.rearrange(
             k,
-            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+            "num_kv_heads kv_len head_dim -> (num_kv_heads kv_len) 1 1 head_dim",
         ).contiguous()
         v = einops.rearrange(
             v,
-            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+            "num_kv_heads kv_len head_dim -> (num_kv_heads kv_len) 1 1 head_dim",
         ).contiguous()
-
-        stride_block = k.stride(0)
-        stride_n = k.stride(1)
 
         if return_lse:
             if lse is None:
@@ -1169,62 +1173,46 @@ class VariableBlockSparseAttentionWrapper:
         else:
             check_shape_dtype_device(out, q.shape, self._o_dtype, q.device, "out")
 
-        if self._backend == "fa3":
-            if (
-                    self._vector_sparse_indices_buffer.numel()
-                    <= self._paged_kv_indices_buf.numel()
-            ):
-                raise ValueError(
-                    "_vector_sparse_indices_buffer is not large enough. Please increase the buffer size."
-                )
-
-            sparse_indices = block_sparse_indices_to_vector_sparse_offsets(
-                self._paged_kv_indices_buf,
-                self._paged_kv_indptr_buf,
-                self._vector_sparse_indices_buffer,  # output
-                self._vector_sparse_indptr_buffer,
-                self._kv_lens_buffer,
-                stride_block // stride_n,
-                1,  # stride_n // stride_n
-                1,  # block_size
-            )
-            sparse_indptr = self._vector_sparse_indptr_buffer
-        else:
-            # sparse_indices = self._paged_kv_indices_buf
-            sparse_indices = self._paged_kv_indices_buf // 1024 * 32768 + self._paged_kv_indices_buf % 1024
-            # chunk = len(sparse_indices) // 8
-            # for i in range(8):
-            #     start = i * chunk
-            #     end = (i + 1) * chunk
-            #     sparse_indices[start:end] = sparse_indices[start:end][torch.randperm(chunk)]
-
-            sparse_indptr = self._paged_kv_indptr_buf
-
-        self._cached_module.run(
+        self._cached_module.paged_run(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
             self._plan_info,
             q,
             k,
             v,
-            sparse_indptr,
-            sparse_indices,
+            self._qo_indptr,
+            self._paged_kv_indptr_buf,
+            self._paged_kv_indices_buf,
             self._paged_kv_last_page_len,
             out,
             lse,
+            self._mask_mode,
             TensorLayout[self._kv_layout].value,
             -1,  # window_left
             enable_pdl,
+            # ADDITIONAL_FUNC_PARAMS
+            # Not supported yet
+            None,  # packed_mask_buf
+            None,  # mask_indptr_buf
             None,  # alibi_slopes_buf
+            None,
+            None,
+            None,
             logits_soft_cap,
             sm_scale,
+            None,  # scale_q
+            None,  # scale_k
+            None,  # scale_v
             rope_scale,
             rope_theta,
+            0,  # token_pos_in_items_len
+            self._workspace_size,
         )
 
+        # [qo_len * num_kv_heads, gqa_group_size, head_dim] -> HND
         out = einops.rearrange(
             out,
-            "num_kv_heads gqa_group_size head_dim -> (num_kv_heads gqa_group_size) head_dim",
+            "(num_kv_heads qo_len) gqa_group_size head_dim -> (num_kv_heads gqa_group_size) qo_len head_dim",
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
 
@@ -1315,9 +1303,8 @@ class SparseSinkAttentionWrapper:
 
     def plan(
             self,
-            block_mask: torch.Tensor,
-            block_size: int,
-            max_length: int,
+            kv_indptr: torch.Tensor,
+            kv_indices: torch.Tensor,
             num_qo_heads: int,
             num_kv_heads: int,
             head_dim: int,
@@ -1337,16 +1324,14 @@ class SparseSinkAttentionWrapper:
             kv_data_type = q_data_type
         kv_data_type = canonicalize_torch_dtype(kv_data_type)
         self._o_dtype = q_data_type
-        device = block_mask.device
+        device = kv_indptr.device
 
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
 
-        # expand mask to indices
-
         kv_indptr_host = kv_indptr.to("cpu", non_blocking=non_blocking)  # for split-kv binary search
 
-        self._paged_kv_indptr_buf = kv_indptr
+        self._paged_kv_indptr_buf = kv_indptr.cumsum(0)
         self._paged_kv_indices_buf = kv_indices
         self._paged_kv_last_page_len = torch.full(
             (num_kv_heads,),
@@ -1358,7 +1343,7 @@ class SparseSinkAttentionWrapper:
 
         # Sanity check
         assert num_qo_heads % num_kv_heads == 0, ("num_qo_heads must be a multiple of num_kv_heads")
-        assert num_kv_heads == block_mask.shape[0]
+        assert num_kv_heads == kv_indptr.shape[0] - 1
 
         if self._backend == "auto":
             self._backend = "fa2"
@@ -1455,13 +1440,8 @@ class SparseSinkAttentionWrapper:
 
         if out is None:
             out = torch.empty_like(q, dtype=self._o_dtype)
-        # sparse_indices = self._paged_kv_indices_buf
-        sparse_indices = self._paged_kv_indices_buf // 1024 * 32768 + self._paged_kv_indices_buf % 1024
-        # chunk = len(sparse_indices) // 8
-        # for i in range(8):
-        #     start = i * chunk
-        #     end = (i + 1) * chunk
-        #     sparse_indices[start:end] = sparse_indices[start:end][torch.randperm(chunk)]
+
+        sparse_indices = self._paged_kv_indices_buf
         sparse_indptr = self._paged_kv_indptr_buf
 
         self._cached_module.run(

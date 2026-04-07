@@ -29,8 +29,10 @@ void radix_topk_ragged_transform(TensorView input, TensorView output_indices, Te
                                  TensorView lengths, Optional<TensorView> maybe_row_states_buffer,
                                  int64_t top_k);
 
-void radix_topk_bool_mask_logits(TensorView logits, TensorView masked_logits,
-                                 TensorView row_states_buffer, int64_t top_k);
+void radix_topk_mask_logits(TensorView logits, TensorView mask_logits, TensorView indptr,
+                                 TensorView indices, TensorView row_states_buffer,
+                                 int64_t top_k_val, uint32_t seq_len, uint32_t block_size,
+                                 uint32_t group_size);
 
 bool can_implement_filtered_topk();
 
@@ -44,7 +46,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk_page_table_transform, radix_topk_page_t
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk_ragged_transform, radix_topk_ragged_transform);
 
 // Fused Top-K + Logits Mask for sparse attention
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk_bool_mask_logits, radix_topk_bool_mask_logits);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk_mask_logits, radix_topk_mask_logits);
 
 // Check if GPU supports FilteredTopK algorithm
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(can_implement_filtered_topk, can_implement_filtered_topk);

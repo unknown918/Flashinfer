@@ -130,30 +130,38 @@ def get_topk_module():
         pass
 
     @register_custom_op(
-        "flashinfer::radix_topk_bool_mask_logits",
+        "flashinfer::radix_topk_mask_logits",
         mutates_args=("row_states_buffer", "output_indices"),
     )
-    def radix_topk_bool_mask_logits(
+    def radix_topk_mask_logits(
             input: torch.Tensor,
-            output_mask: torch.Tensor,
+            mask_logits: torch.Tensor,
+            indptr: torch.Tensor,
+            indices: torch.Tensor,
             row_states_buffer: Optional[torch.Tensor],
-            top_k: int
+            top_k: int,
+            max_length: int,
+            group_size: int,
+            block_size: int
     ) -> None:
         # Supports float32, float16, bfloat16
         assert input.dtype in [torch.float32, torch.float16, torch.bfloat16], (
             f"Unsupported dtype {input.dtype}, expected float32, float16, or bfloat16"
         )
 
-        module.radix_topk_bool_mask_logits(
-            input, output_mask, row_states_buffer, top_k
+        module.radix_topk_mask_logits(
+            input, mask_logits, indptr, indices, row_states_buffer, top_k, max_length, block_size, group_size
         )
 
-    @register_fake_op("flashinfer::radix_topk_bool_mask_logits")
-    def _fake_radix_topk_bool_mask_logits(
+    @register_fake_op("flashinfer::radix_topk_mask_logits")
+    def _fake_radix_topk_mask_logits(
             input: torch.Tensor,
-            output_mask: torch.Tensor,
+            mask_logits: torch.Tensor,
+            indptr: torch.Tensor,
+            indices: torch.Tensor,
             row_states_buffer: Optional[torch.Tensor],
-            top_k: int
+            top_k: int,
+            block_size: int = 32
     ) -> torch.Tensor:
         pass
 
@@ -161,7 +169,7 @@ def get_topk_module():
         radix_topk=radix_topk,
         radix_topk_page_table_transform=radix_topk_page_table_transform,
         radix_topk_ragged_transform=radix_topk_ragged_transform,
-        radix_topk_bool_mask_logits=radix_topk_bool_mask_logits,
+        radix_topk_mask_logits=radix_topk_mask_logits,
         can_implement_filtered_topk=module.can_implement_filtered_topk,
     )
 
@@ -445,24 +453,16 @@ def top_k_ragged_transform(
 
 
 def topk_bool_mask_logits(
-        input: torch.Tensor,
         k: int,
-        max_length: int,
-) -> torch.Tensor:
+        input: torch.Tensor,
+        indptr: torch.Tensor,
+        indices: torch.Tensor,
+        mask_logits: torch.Tensor,
+        max_length: int = 1024,
+        group_size: int = 4,
+        block_size: int = 32,
+) -> None:
     device = input.device
-
-    # Check settings for output_mask
-    assert max_length is not None, (
-        f"max length of the mask must be specified"
-    )
-    assert max_length >= input.size(1), (
-        f"max_length {max_length} is smaller than the input length {input.size(1)}"
-    )
-
-    batch_size = input.size(0)
-    output_mask = torch.zeros(
-        batch_size, max_length, dtype=torch.uint8, device=input.device
-    )
 
     # Allocate row_states buffer for multi-CTA path
     row_states_buffer: Optional[torch.Tensor] = _get_cache_buf(
@@ -471,8 +471,8 @@ def topk_bool_mask_logits(
         device
     )
 
-    get_topk_module().radix_topk_bool_mask_logits(
-        input, output_mask, row_states_buffer, k
+    get_topk_module().radix_topk_mask_logits(
+        input,
+        mask_logits, indptr, indices,
+        row_states_buffer, k, max_length, group_size, block_size
     )
-
-    return output_mask

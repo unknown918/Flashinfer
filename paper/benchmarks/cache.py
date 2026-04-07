@@ -2,12 +2,6 @@ import torch
 import einops
 import flashinfer
 
-seq_len = 1028
-head_dim = 128
-page_size = 32
-num_kv_heads = 8
-max_length = 131072
-
 
 def assert_close(a, b):
     rtol, atol = {
@@ -16,6 +10,12 @@ def assert_close(a, b):
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
+
+seq_len = 1028
+head_dim = 128
+page_size = 32
+num_kv_heads = 8
+max_length = 131072
 
 num_pages = (max_length + page_size - 1) // page_size
 

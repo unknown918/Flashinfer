@@ -158,64 +158,6 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint
   block.sync();
 }
 
-// dim3 nblks(total_ctas);
-// dim3 nthrs(BLOCK_THREADS);
-template <uint32_t BLOCK_THREADS, typename DType, typename IdType>
-__global__ void FusedMaskExpansionKernel(DType* mask, IdType* indptr, IdType* indices,
-                                         uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                         uint32_t group_size, uint32_t num_active_pages,
-                                         uint32_t max_length, uint32_t page_size,
-                                         uint32_t chunk_size, uint32_t ctas_per_row) {
-  const uint32_t global_cta_id = blockIdx.x;
-  const uint32_t row_idx = global_cta_id / ctas_per_row;
-  const uint32_t cta_idx = global_cta_id % ctas_per_row;
-  const uint32_t tx = threadIdx.x;
-  uint32_t chunk_start = cta_idx * chunk_size;
-  uint32_t chunk_end = min(chunk_start + chunk_size, num_active_pages);
-  unsigned int pos = 0;
-
-  extern __shared__ uint32_t smem[];
-  bool hit = false;
-#define row_offset indptr[row_idx + 1]
-
-  // per group union
-  for (uint32_t i = chunk_start; i < chunk_end; i++) {
-    DType flag = mask[row_idx * max_length + i];
-#pragma unroll
-    for (uint32_t j = 1; j < group_size; j++) {
-      flag = flag | mask[(row_idx + j) * max_length + i];
-    }
-    hit = flag == 1;
-  }
-
-  // intra warp reduction
-  unsigned int ballot_mask = __ballot_sync(0xFFFFFFFF, hit);
-  unsigned int count = ballot_mask;
-  if (tx == 0) {
-    pos = atomicAdd(&row_offset, count); // position to write in
-  }
-  while (count != 0) {
-    int id = __ffs(count) - 1;
-    count &= count - 1;
-
-    uint32_t broadcast_pos = __shfl_sync(0xFFFFFFFF, pos, 0);
-    uint32_t broadcast_i = __shfl_sync(0xFFFFFFFF, i, id);
-
-    uint32_t token_idx = chunk_start + broadcast_i;  // token index
-    // uint32_t pos = broadcast_pos + lane_id;          // position in output tensor
-    // uint32_t token_idx = (chunk_start + broadcast_i) * 32 + lane_id;
-    uint32_t pos = broadcast_pos * 32 + lane_id;
-    // [&](uint32_t original_idx, OrderedType ordered_val, int pos) {
-    //   row_output[pos] = static_cast<IdType>(original_idx);
-    //   row_output_values[pos] = Traits::FromOrdered(ordered_val);
-    // });
-    output_func(token_idx, ordered_val, pos);
-  }
-}
-
-
-}
-
 /*!
  * \brief Get the heuristic number of threads per threadblock
  * \param group_size The number of qo heads that maps to the same kv head in GQA.
@@ -290,38 +232,6 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
       return cudaSuccess;
     });
   });
-}
-
-template <typename DType, typename IdType>
-cudaError_t FusedMaskExpansionMultiCTA(DType* mask, IdType* indptr, IdType* indices,
-                                       uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                       uint32_t group_size, uint32_t max_length,
-                                       uint32_t num_active_pages, uint32_t page_size,
-                                       cudaStream_t stream) {
-  constexpr uint32_t BLOCK_THREADS = 128;
-  const uint32_t vec_size = 16 / sizeof(DType);
-  num_active_pages = round_up(num_active_pages, vec_size);
-
-  size_t smem_size = sizeof(uint32_t);
-
-  uint32_t ctas_per_row = ceil_div(max_length, BLOCK_THREADS);  // 1024 / 128 = 8
-  uint32_t chunk_size = BLOCK_THREADS;
-  uint32_t total_ctas = num_kv_heads * ctas_per_row;
-
-  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-    auto kernel = FusedMaskExpansionKernel<BLOCK_THREADS, DType, IdType>;
-    FLASHINFER_CUDA_CALL(
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-
-    dim3 nblks(total_ctas);
-    dim3 nthrs(BLOCK_THREADS);
-    void* args[] = {&mask,         &indptr,     &indices,          &num_qo_heads,
-                    &num_kv_heads, &group_size, &num_active_pages, &max_length,
-                    &page_size,    &chunk_size, &ctas_per_row};
-    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
-  });
-
-  return cudaSuccess;
 }
 }  // namespace flashinfer
 

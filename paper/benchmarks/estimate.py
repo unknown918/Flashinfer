@@ -47,6 +47,7 @@ estimation_overhead = np.median(
         use_cuda_graph=True
     )
 )
+
 print(f"Estimation Overhead:  {estimation_overhead:.3f} ms")
 pooling = pooling.repeat_interleave(4, dim=1)
 ref = torch.einsum("hd,thd->th", q, pooling[:seq_len])
