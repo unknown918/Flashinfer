@@ -461,7 +461,7 @@ def topk_bool_mask_logits(
         max_length: int = 1024,
         group_size: int = 4,
         block_size: int = 32,
-) -> None:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     device = input.device
 
     # Allocate row_states buffer for multi-CTA path
@@ -476,3 +476,5 @@ def topk_bool_mask_logits(
         mask_logits, indptr, indices,
         row_states_buffer, k, max_length, group_size, block_size
     )
+
+    return indptr, indices

@@ -1240,13 +1240,6 @@ class SparseSinkAttentionWrapper:
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
         )
-        if backend in ["fa3", "auto"]:
-            self._vector_sparse_indices_buffer = torch.empty(
-                (128 * 1024 * 1024,), dtype=torch.int32, device=self.device
-            )
-            self._vector_sparse_indptr_buffer = torch.empty(
-                (32768,), dtype=torch.int32, device=self.device
-            )
 
         self._kv_lens_buffer = torch.empty(
             (32768,), dtype=torch.int32, device=self.device
@@ -1345,8 +1338,8 @@ class SparseSinkAttentionWrapper:
         assert num_qo_heads % num_kv_heads == 0, ("num_qo_heads must be a multiple of num_kv_heads")
         assert num_kv_heads == kv_indptr.shape[0] - 1
 
-        if self._backend == "auto":
-            self._backend = "fa2"
+        # Ampere-only
+        self._backend = "fa2"
 
         get_module_args = (
             q_data_type,
@@ -1401,7 +1394,7 @@ class SparseSinkAttentionWrapper:
             lse: Optional[torch.Tensor] = None,
             return_lse: bool = False,
             enable_pdl: Optional[bool] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         import einops
 
         if enable_pdl is None:
@@ -1431,11 +1424,11 @@ class SparseSinkAttentionWrapper:
         # k and v are allocated to store max_length tokens,non-seq value is set to zero
         k = einops.rearrange(
             k,
-            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+            "num_pages page_size num_kv_heads head_dim -> (num_pages page_size num_kv_heads) 1 1 head_dim",
         ).contiguous()
         v = einops.rearrange(
             v,
-            "num_kv_heads num_pages page_size head_dim -> (num_kv_heads num_pages page_size) 1 1 head_dim",
+            "num_pages page_size num_kv_heads head_dim -> (num_pages page_size num_kv_heads) 1 1 head_dim",
         ).contiguous()
 
         if out is None:
@@ -1472,11 +1465,4 @@ class SparseSinkAttentionWrapper:
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
 
-        if return_lse:
-            lse = einops.rearrange(
-                lse,
-                "(num_kv_heads qo_len) gqa_group_size -> (num_kv_heads gqa_group_size) qo_len",
-                num_kv_heads=self._num_kv_heads,
-            ).contiguous()
-
-        return (out, lse) if return_lse else out
+        return out

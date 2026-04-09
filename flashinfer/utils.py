@@ -45,7 +45,6 @@ class MaskMode(Enum):
 class TensorLayout(Enum):
     NHD = 0
     HND = 1
-    HNND = 2
 
 
 log2e = 1.44269504088896340736

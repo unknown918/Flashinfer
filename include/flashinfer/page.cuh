@@ -137,17 +137,11 @@ struct paged_kv_t {
         indptr(indptr),
         last_page_len(last_page_len),
         rope_pos_offset(rope_pos_offset) {
+    stride_page = kv_strides[0];
     this->k_data = k_data;
     this->v_data = v_data;
-    if (layout != QKVLayout::kHNND) {
-      stride_page = kv_strides[0];
-      stride_n = layout == QKVLayout::kHND ? kv_strides[2] : kv_strides[1];
-      stride_h = layout == QKVLayout::kHND ? kv_strides[1] : kv_strides[2];
-    } else {
-      stride_page = kv_strides[1];
-      stride_n = kv_strides[2];
-      stride_h = kv_strides[0];
-    }
+    stride_n = layout == QKVLayout::kHND ? kv_strides[2] : kv_strides[1];
+    stride_h = layout == QKVLayout::kHND ? kv_strides[1] : kv_strides[2];
   }
 
   __host__ __device__ __forceinline__ uint32_t get_length(uint32_t batch_idx) const {
@@ -299,34 +293,34 @@ __global__ void AppendPagedKVCachePrefillKernel(paged_kv_t<DType, IdType> paged_
   uint32_t sink = 4U;  // sink tokens will cause page shifting
 
   uint32_t page_nums =
-      paged_kv.indptr[1] -
-      static_cast<uint32_t>(paged_kv.last_page_len[0] < sink && paged_kv.last_page_len[0] != 0);
+      paged_kv.indptr[1] - static_cast<uint32_t>(paged_kv.last_page_len[0] <= sink);
 
   if (ty < sink) {
     DType* k_ptr = paged_kv.get_k_ptr(0, head_idx, ty, tx * vec_size);
     DType* v_ptr = paged_kv.get_v_ptr(0, head_idx, ty, tx * vec_size);
     vec_t<DType, vec_size>::memcpy(
         k_ptr, append_key + ty * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
-    vec_t<DType, vec_size>::memcpy(v_ptr, append_value + ty * append_v_stride_n +
-                                              head_idx * append_v_stride_h + tx * vec_size);
+    vec_t<DType, vec_size>::memcpy(
+        v_ptr, append_value + ty * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
   }
 
 #pragma unroll 4
   // logical page, has 4 shift to actual value
   for (uint32_t page_idx = begin_idx; page_idx < page_nums; page_idx += stride) {
     // entry \in [0, page_size]
-    uint32_t page_start_idx = 0U;  // prefill, can assure start from 0
-    uint32_t page_end_idx = min(page_size, seq_len - sink - page_idx * page_size);
+    uint32_t entry_start_idx = 0U;  // prefill, can assure start from 0
+    uint32_t entry_end_idx = min(page_size, seq_len - sink - page_idx * page_size);
 
     vec_t<DType, vec_size> local_pool;
     local_pool.fill(static_cast<DType>(0.0));
 
-    for (uint32_t entry = page_start_idx; entry < page_end_idx; entry++) {
+    for (uint32_t entry = entry_start_idx; entry < entry_end_idx; entry++) {
       uint32_t i_logical = page_idx * page_size + entry;
       uint32_t i_actual = i_logical + sink;
       uint32_t page_iter, entry_idx;
 
       paged_kv.page_size.divmod(i_actual, page_iter, entry_idx);
+
       DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
       DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
 
@@ -453,7 +447,6 @@ cudaError_t AppendPagedKVCachePrefill(paged_kv_t<DType, IdType> paged_kv, DType*
   uint32_t num_heads = paged_kv.num_heads;
   int dev_id = 0;
   int num_sms = 0;
-  int num_blocks_per_sm = 0;
   FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
 

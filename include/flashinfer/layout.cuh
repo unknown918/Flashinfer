@@ -29,8 +29,7 @@ enum class QKVLayout {
   // [seq_len, num_heads, head_dim]
   kNHD = 0U,
   // [num_heads, seq_len, head_dim]
-  kHND = 1U,
-  kHNND = 2U
+  kHND = 1U
 };
 
 __host__ __device__ __forceinline__ size_t get_elem_offset_impl(size_t elem_idx, size_t head_idx,
@@ -120,8 +119,6 @@ inline std::string QKVLayoutToString(const QKVLayout& layout) {
       return "NHD";
     case QKVLayout::kHND:
       return "HND";
-    case QKVLayout::kHNND:
-      return "kHNND";
     default:
       return "Unknown";
   }

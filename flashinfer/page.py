@@ -133,6 +133,7 @@ def _append_paged_kv_cache_prefill_kernel(
         pooling
     )
 
+
 @register_custom_op(
     "flashinfer::append_paged_kv_cache_decode",
     mutates_args=("paged_k_cache", "paged_v_cache"),
@@ -162,6 +163,7 @@ def _append_paged_kv_cache_decode_kernel(
         layout,
         pooling
     )
+
 
 @register_fake_op("flashinfer::append_paged_kv_cache")
 def _fake_append_paged_kv_cache_kernel(
@@ -308,6 +310,7 @@ def append_paged_mla_kv_cache(
         kv_last_page_len,
     )
 
+
 def append_paged_kv_cache_decode(
         append_key: torch.Tensor,
         append_value: torch.Tensor,
@@ -329,6 +332,7 @@ def append_paged_kv_cache_decode(
         TensorLayout[kv_layout].value,
         pooling
     )
+
 
 def append_paged_kv_cache_prefill(
         append_key: torch.Tensor,

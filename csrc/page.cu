@@ -43,7 +43,7 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
   CHECK_DIM(1, kv_indptr);
   CHECK_DIM(1, kv_last_page_len);
   CHECK_DIM(3, pooling);
-  unsigned int seq_len = append_key.size(1);
+  unsigned int seq_len = append_key.size(0);
   unsigned int batch_size = kv_last_page_len.size(0);
   TVM_FFI_ICHECK_EQ(kv_indptr.size(0), batch_size + 1);
   CHECK_DEVICE(append_key, append_key);
@@ -58,14 +58,11 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
 
   unsigned int num_heads, page_size, head_dim;
   head_dim = paged_k_cache.size(3);
-  if (kv_layout == QKVLayout::kHND) {
-    num_heads = paged_k_cache.size(1);
-    page_size = paged_k_cache.size(2);
-  } else if (kv_layout == QKVLayout::kNHD) {
+  if (kv_layout == QKVLayout::kNHD) {
     page_size = paged_k_cache.size(1);
     num_heads = paged_k_cache.size(2);
-  } else if (kv_layout == QKVLayout::kHNND) {
-    num_heads = paged_k_cache.size(0);
+  } else if (kv_layout == QKVLayout::kHND) {
+    num_heads = paged_k_cache.size(1);
     page_size = paged_k_cache.size(2);
   }
 
@@ -77,20 +74,15 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
       << "k/v strides must be identical";
 
   auto append_k_strides = append_key.strides();
-  auto append_k_stride_h = append_k_strides[0];
-  auto append_k_stride_n = append_k_strides[1];
+  auto append_k_stride_n = append_k_strides[0];
+  auto append_k_stride_h = append_k_strides[1];
   auto append_v_strides = append_value.strides();
-  auto append_v_stride_h = append_v_strides[0];
-  auto append_v_stride_n = append_v_strides[1];
+  auto append_v_stride_n = append_v_strides[0];
+  auto append_v_stride_h = append_v_strides[1];
 
   auto pooling_strides = pooling.strides();
   auto pooling_stride_n = pooling_strides[0];
   auto pooling_stride_h = pooling_strides[1];
-
-  TVM_FFI_ICHECK_EQ(append_key.size(0), num_heads);
-  TVM_FFI_ICHECK_EQ(append_key.size(2), head_dim);
-  TVM_FFI_ICHECK_EQ(append_value.size(0), num_heads);
-  TVM_FFI_ICHECK_EQ(append_value.size(2), head_dim);
 
   cudaSetDevice(append_key.device().device_id);
   const cudaStream_t stream = get_stream(append_key.device());
@@ -159,9 +151,6 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
   } else if (kv_layout == QKVLayout::kNHD) {
     num_heads = paged_k_cache.size(2);
     page_size = paged_k_cache.size(1);
-  } else if (kv_layout == QKVLayout::kHNND) {
-    num_heads = paged_k_cache.size(0);
-    page_size = paged_k_cache.size(2);
   }
 
   // get kv_cache_strides
