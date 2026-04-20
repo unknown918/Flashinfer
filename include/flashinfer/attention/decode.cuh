@@ -548,9 +548,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
 #pragma unroll
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
       kv_offset[j] = kv_offset_smem[((((iter + num_stages_smem) % bdx) * bdz + tz) * bdy + ty) *
-                                        tile_size_per_bdx +
-                                    j] +
-                     tx * vec_size;
+                                        tile_size_per_bdx + j] + tx * vec_size;
     }
 
     // load k tiles
@@ -587,8 +585,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
   block.sync();
 
   // sync local state of all warps inside a threadblock
-  sync_state<vec_size, bdx, bdy, bdz>(variant, st, reinterpret_cast<float*>(smem), smem_md, tx, ty,
-                                      tz);
+  sync_state<vec_size, bdx, bdy, bdz>(variant, st, reinterpret_cast<float*>(smem), smem_md, tx, ty, tz);
 #pragma unroll
   for (size_t i = 0; i < vec_size; ++i) {
     st.o[i] = variant.OutputTransform(params, st.o[i], bx, /*qo_idx=*/0, qo_head_idx, st.m, st.d,

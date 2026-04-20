@@ -108,6 +108,7 @@ def _append_paged_mla_kv_cache_kernel(
     mutates_args=("paged_k_cache", "paged_v_cache"),
 )
 def _append_paged_kv_cache_prefill_kernel(
+        sink: int,
         append_key: torch.Tensor,
         append_value: torch.Tensor,
         paged_k_cache: Optional[torch.Tensor],
@@ -129,6 +130,7 @@ def _append_paged_kv_cache_prefill_kernel(
         kv_indices,
         kv_indptr,
         kv_last_page_len,
+        sink,
         layout,
         pooling
     )
@@ -335,6 +337,7 @@ def append_paged_kv_cache_decode(
 
 
 def append_paged_kv_cache_prefill(
+        sink: int,
         append_key: torch.Tensor,
         append_value: torch.Tensor,
         paged_kv_cache: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
@@ -450,6 +453,7 @@ def append_paged_kv_cache_prefill(
     """
     _check_kv_layout(kv_layout)
     _append_paged_kv_cache_prefill_kernel(
+        sink,
         append_key,
         append_value,
         *_unpack_paged_kv_cache(paged_kv_cache, kv_layout),

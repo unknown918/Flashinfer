@@ -1,6 +1,6 @@
 import torch
 import flashinfer
-from cache import PagedKVCache
+from paper.utils.cache import PagedKVCache
 
 
 class AttentionRunner:
@@ -12,11 +12,14 @@ class AttentionRunner:
             num_qo_heads: int,
             page_size: int,
             max_length: int,
+            sink: int = 4,
             topk: int = 16,
             dtype: torch.dtype = torch.float16,
-            device: torch.device = "cuda:0"
+            device: str = "cuda:0"
     ):
-        self.sink = 4  # hard coded in kernel
+        device = torch.device(device)
+
+        self.sink = sink
         self.topk = topk
         self.page_size = page_size
         self.max_length = max_length
@@ -25,17 +28,17 @@ class AttentionRunner:
         # sparse attention buffers (one for all layers)
         self.indptr = torch.zeros(
             1 + num_kv_heads,
-            dtype=torch.uint32,
+            dtype=torch.int32,
             device=device
         )
         self.indices = torch.zeros(
             num_kv_heads * (self.sink + self.topk * self.group_size * page_size),
-            dtype=torch.uint32,
+            dtype=torch.int32,
             device=device
         )
         self.mask_logits = torch.zeros(
             num_qo_heads // self.group_size, max_length,
-            dtype=torch.uint32,
+            dtype=torch.int32,
             device=device
         )
 
@@ -45,7 +48,7 @@ class AttentionRunner:
         workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
         self.decode_wrapper = flashinfer.SparseSinkAttentionWrapper(workspace_buffer)
         self.logits = torch.zeros(num_qo_heads, num_pages, dtype=dtype, device=device)
-        self.out = torch.zeros(num_kv_heads, head_dim, dtype=dtype, device=device)
+        self.out = torch.zeros(num_qo_heads, head_dim, dtype=dtype, device=device)
 
         # paged kv cache manager
         self.cache_manager = PagedKVCache(
@@ -54,14 +57,22 @@ class AttentionRunner:
             num_qo_heads=num_qo_heads,
             num_kv_heads=num_kv_heads,
             max_length=max_length,
-            sink=self.sink,
+            sink=sink,
             page_size=page_size,
             device=device,
             dtype=dtype
         )
 
-    def prefill(self, layer_id: int, q: torch.Tenspr, k: torch.Tensor, v: torch.Tenssor) -> torch.Tensor:
+    def prefill(self, layer_id: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        q, k = flashinfer.apply_llama31_rope(
+            q,
+            k,
+            torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device),
+            torch.tensor([0], dtype=torch.int32, device=q.device),
+        )
+
         self.cache_manager.append_page_prefill(layer_id, k, v)
+
         # no sparsity for prefill
         return flashinfer.single_prefill_with_kv_cache(
             q=q,
@@ -72,29 +83,40 @@ class AttentionRunner:
         )
 
     def decode(self, layer_id: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # TODO: could use a cuda graph to replay this process
-        self.cache_manager.append_page_decode(layer_id, k, v)
-
-        # estimate token importance
-        flashinfer.decode.estimate(
-            q,
-            out=self.logits,
-            seq_len=self.cache_manager.seq_len,
-            pooling=self.cache_manager.pooling
+        q, k = flashinfer.apply_llama31_rope(
+            q.unsqueeze(0),
+            k.unsqueeze(0),
+            torch.tensor([0, 1], dtype=torch.int32, device=q.device),
+            torch.tensor([self.cache_manager.seq_len], dtype=torch.int32, device=q.device),
         )
+
+        # TODO: could use a cuda graph to replay this process
+        self.cache_manager.append_page_decode(layer_id, k[0], v)
+
+        # fixme: sometimes got zero logits?
+        self.logits = flashinfer.decode.estimate(
+            seq_len=self.cache_manager.current_pages,
+            query=q[0],
+            pooling=self.cache_manager.pooling[layer_id] / 32,
+            out=self.logits
+        )
+
+        num_valid_pages = (self.cache_manager.seq_len - 4 + self.page_size - 1) // self.page_size
+        last_page_len = (self.cache_manager.seq_len - 4) - (num_valid_pages - 1) * self.page_size
 
         # expand top-k token's indices
-        flashinfer.topk_bool_mask_logits(
-            input=self.logits,
+        self.indptr, self.indices = flashinfer.topk_bool_mask_logits(
+            topk=self.topk - 1,
+            page_size=self.page_size,
+            last_page_len=last_page_len,
+            num_valid_pages=num_valid_pages - 1,  # always select last page
+            logits=self.logits,
             indptr=self.indptr,
             indices=self.indices,
-            mask_logits=self.mask_logits,
-            k=self.topk,
-            max_length=self.cache_manager.num_pages,
             group_size=self.group_size,
-            block_size=self.cache_manager.page_size
+            mask_logits=self.mask_logits
         )
-
+        self.indptr = self.indptr.cumsum(dim=0, dtype=torch.int32)
         # split-K and other stuff
         self.decode_wrapper.plan(
             kv_indptr=self.indptr,
@@ -106,11 +128,15 @@ class AttentionRunner:
         )
 
         attn_output = self.decode_wrapper.run(
-            q=q,
+            q=q[0],
             k=self.cache_manager.paged_k_cache[layer_id],
             v=self.cache_manager.paged_v_cache[layer_id],
             out=self.out,
             return_lse=False
         )
+
+        self.indptr.zero_()
+        self.indices.zero_()
+        self.logits.zero_()
 
         return attn_output

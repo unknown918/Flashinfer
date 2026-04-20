@@ -1,36 +1,43 @@
-import transformers
 import torch
+import transformers
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from patch_llama import LlamaForCausalLM
 
-# TODO: Fix shape !!!
-# TODO: Fix hard-code in topk and sink
+transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
-# patch llama
-# from .llama import LlamaForCausalLM
-#
-# transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
-
-device = "cuda:2"
-
+device = torch.device("cuda:2")
 model_id = "../Llama-3.1-8B-Instruct"
-pipeline = transformers.pipeline(
-    "text-generation",
-    model=model_id,
-    model_kwargs={"dtype": torch.bfloat16},
-    device=device,
-)
 
-# input without transpose: torch.Size([1, 39, 32, 128]) # [num_page, page_size, num_heads, head_dim], NHD
-# output shape:  torch.Size([1, 39, 4096])
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True
+).to(device)
 
+model.eval()
+with open("prompt.txt", 'r', encoding='utf-8') as f:
+    prompt = f.read()
 messages = [
-    {
-        "role": "user",
-        "content": "Who are you?"
-    },
+    {"role": "user", "content": f"{prompt}\nRead this paper, and tell me who are you.\n"},
 ]
 
-outputs = pipeline(
+input_ids = tokenizer.apply_chat_template(
     messages,
-    max_new_tokens=256,
+    add_generation_prompt=True,
+    return_tensors="pt"
+).to(device)
+
+print("Sequence Length: ", input_ids.shape[1])
+
+generated_outputs = model.generate(
+    input_ids,
+    max_new_tokens=1,
+    do_sample=False,
+    temperature=0,
+    pad_token_id=tokenizer.eos_token_id
 )
-print(outputs[0]["generated_text"][-1])
+
+new_tokens = generated_outputs[0][input_ids.shape[-1]:]
+response = tokenizer.decode(new_tokens, skip_special_tokens=True)
+print(response)

@@ -134,23 +134,24 @@ def get_topk_module():
         mutates_args=("row_states_buffer", "output_indices"),
     )
     def radix_topk_mask_logits(
-            input: torch.Tensor,
+            logits: torch.Tensor,
             mask_logits: torch.Tensor,
             indptr: torch.Tensor,
             indices: torch.Tensor,
             row_states_buffer: Optional[torch.Tensor],
-            top_k: int,
-            max_length: int,
+            topk: int,
+            num_valid_pages: int,
+            last_page_len: int,
             group_size: int,
-            block_size: int
+            page_size: int,
     ) -> None:
         # Supports float32, float16, bfloat16
-        assert input.dtype in [torch.float32, torch.float16, torch.bfloat16], (
-            f"Unsupported dtype {input.dtype}, expected float32, float16, or bfloat16"
+        assert logits.dtype in [torch.float32, torch.float16, torch.bfloat16], (
+            f"Unsupported dtype {logits.dtype}, expected float32, float16, or bfloat16"
         )
 
         module.radix_topk_mask_logits(
-            input, mask_logits, indptr, indices, row_states_buffer, top_k, max_length, block_size, group_size
+            logits, mask_logits, indptr, indices, row_states_buffer, topk, num_valid_pages, last_page_len, group_size, page_size
         )
 
     @register_fake_op("flashinfer::radix_topk_mask_logits")
@@ -161,7 +162,10 @@ def get_topk_module():
             indices: torch.Tensor,
             row_states_buffer: Optional[torch.Tensor],
             top_k: int,
-            block_size: int = 32
+            seq_len: int,
+            last_page_len: int,
+            group_size: int,
+            page_size: int,
     ) -> torch.Tensor:
         pass
 
@@ -453,16 +457,17 @@ def top_k_ragged_transform(
 
 
 def topk_bool_mask_logits(
-        k: int,
-        input: torch.Tensor,
+        topk: int,
+        page_size: int,
+        last_page_len: int,
+        num_valid_pages: int,
+        logits: torch.Tensor,
         indptr: torch.Tensor,
         indices: torch.Tensor,
+        group_size: int,
         mask_logits: torch.Tensor,
-        max_length: int = 1024,
-        group_size: int = 4,
-        block_size: int = 32,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    device = input.device
+    device = logits.device
 
     # Allocate row_states buffer for multi-CTA path
     row_states_buffer: Optional[torch.Tensor] = _get_cache_buf(
@@ -472,9 +477,10 @@ def topk_bool_mask_logits(
     )
 
     get_topk_module().radix_topk_mask_logits(
-        input,
+        logits,
         mask_logits, indptr, indices,
-        row_states_buffer, k, max_length, group_size, block_size
+        row_states_buffer,
+        topk, num_valid_pages, last_page_len, group_size, page_size
     )
 
     return indptr, indices

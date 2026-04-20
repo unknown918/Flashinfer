@@ -20,7 +20,8 @@ using tvm::ffi::Tensor;
 void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_value,
                                    TensorView paged_k_cache, TensorView paged_v_cache,
                                    TensorView kv_indices, TensorView kv_indptr,
-                                   TensorView kv_last_page_len, int64_t layout, TensorView pooling);
+                                   TensorView kv_last_page_len, uint32_t sink, int64_t layout,
+                                   TensorView pooling);
 
 void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value,
                                   TensorView paged_k_cache, TensorView paged_v_cache,

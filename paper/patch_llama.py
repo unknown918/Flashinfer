@@ -40,8 +40,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
 from transformers.models.llama.configuration_llama import LlamaConfig
 
-from .utils.attention import AttentionRunner
-from .utils.cache import PagedKVCache
+from utils.attention import AttentionRunner
 
 logger = logging.get_logger(__name__)
 
@@ -110,14 +109,6 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class LlamaMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -176,15 +167,13 @@ class LlamaAttention(nn.Module):
         k = self.k_proj(hidden_states).view(hidden_shape)[0]
         v = self.v_proj(hidden_states).view(hidden_shape)[0]
 
-        cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
-
         if q.shape[0] > 1:  # prefill
             output = attn_runner.prefill(self.layer_idx, q, k, v)
+            attn_output = self.o_proj(output.reshape(output.shape[0], -1))
         else:  # decode
-            output = attn_runner.decode(self.layer_idx, q, k, v)
+            output = attn_runner.decode(self.layer_idx, q[0], k[0], v[0])
+            attn_output = self.o_proj(output.reshape(-1))
 
-        attn_output = self.o_proj(output)
         return attn_output
 
 
@@ -273,7 +262,7 @@ class LlamaModel(LlamaPreTrainedModel):
             max_length=32768,  # config.max_position_embeddings: 131072
             topk=16,
             dtype=config.dtype,
-            device=self.device
+            device="cuda:2"
         )
 
         # Initialize weights and apply final processing
@@ -299,8 +288,8 @@ class LlamaModel(LlamaPreTrainedModel):
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states = decoder_layer(
-                hidden_states,
                 self.attn_runner,
+                hidden_states,
                 position_embeddings=position_embeddings,
                 **kwargs,
             )

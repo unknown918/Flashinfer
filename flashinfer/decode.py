@@ -354,9 +354,9 @@ def get_decode_estimate_module():
 
 
 def estimate(
+        seq_len: int,
         query: torch.Tensor,
         pooling: torch.Tensor,
-        seq_len: int,
         out: torch.Tensor
 ) -> torch.Tensor:
     get_decode_estimate_module().estimate(
@@ -365,6 +365,7 @@ def estimate(
         seq_len,
         out
     )
+
     return out
 
 

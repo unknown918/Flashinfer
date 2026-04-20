@@ -30,9 +30,9 @@ void radix_topk_ragged_transform(TensorView input, TensorView output_indices, Te
                                  int64_t top_k);
 
 void radix_topk_mask_logits(TensorView logits, TensorView mask_logits, TensorView indptr,
-                                 TensorView indices, TensorView row_states_buffer,
-                                 int64_t top_k_val, uint32_t seq_len, uint32_t block_size,
-                                 uint32_t group_size);
+                            TensorView indices, TensorView row_states_buffer, int64_t top_k_val,
+                            uint32_t seq_len, uint32_t last_page_len, uint32_t group_size,
+                            uint32_t page_size);
 
 bool can_implement_filtered_topk();
 

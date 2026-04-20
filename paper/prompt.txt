@@ -1,0 +1,168 @@
+\begin{document}
+    \maketitle
+
+    \begin{abstract}
+        Long-context autoregressive decoding in large language models is increasingly memory-bound due to repeated access to an ever-growing key-value (KV) cache. Sparse attention offers a potential remedy by reducing KV access, but existing approaches often fail to achieve proportional speedups or preserve generation quality, largely due to inaccurate token selection and poor alignment with GPU memory behavior. This proposal investigates a hybrid sparse attention design for the decoding stage that combines limited token-level selection with predominantly block-level sparsity. The goal is to improve selection accuracy while maintaining memory-coalesced access patterns for high effective bandwidth. We further study kernel-level designs that support this hybrid pattern, including KV cache layouts, selection mechanisms, and GPU-resident index materialization. Preliminary results indicate that the proposed approach can preserve long-context accuracy under constrained KV budgets while delivering substantial decoding speedups. This research aims to complete an end-to-end system, eliminate remaining bottlenecks, and explore broader extensions of hybrid sparsity for efficient long-context inference.
+    \end{abstract}
+
+\section{Introduction}
+Self-attention~\cite{attention} is a fundamental building block of modern large language models (LLMs)~\cite{gpt, gemini, r1, llama}, enabling strong empirical performance and efficient parallelism during training. During inference, however, the computational profile of self-attention changes substantially. In autoregressive decoding, each newly generated token attends to all previously generated tokens by reading their keys and values from the key-value (KV) cache. As the sequence length grows, the KV cache increases linearly, causing the memory traffic per decoding step to grow proportionally~\cite{fa2}. For long-context inference, this process becomes increasingly memory-bound, leading to sharply increased end-to-end latency and reduced throughput.
+
+This issue is particularly acute for reasoning-oriented LLMs, which often require long chains of intermediate reasoning steps before producing a final answer~\cite{cot, r1}. In such workloads, decoding latency is dominated not by computation, but by repeated memory access to an ever-growing KV cache. As a result, efficient long-context decoding has become a critical systems challenge for the practical deployment of large models.
+
+Sparse attention~\cite{nsa, moba, quest, ds} has emerged as a promising approach to mitigating this bottleneck by restricting attention computation to a subset of KV entries deemed most relevant. Conceptually, sparse attention systems decompose into two components~\cite{twilight}: (1) a selection mechanism that identifies relevant past tokens, and (2) a sparse attention kernel that computes attention over the selected subset. By reducing the amount of KV data accessed at each decoding step, sparse attention has the potential to substantially reduce memory traffic and improve scalability to long contexts.
+
+In practice, however, sparse attention often fails to deliver proportional wall-clock speedups despite its theoretical reductions in FLOPs~\cite{nsa}, and may introduce non-trivial degradation in generation quality. This discrepancy between theoretical efficiency and practical performance suggests that sparsity alone is insufficient: effective long-context inference requires careful consideration of how sparsity interacts with both model behavior and accelerator hardware.
+
+\section{Problem Statement}
+\label{sec::problem}
+Despite its promise, sparse attention for long-context autoregressive decoding faces fundamental challenges that limit its practical effectiveness on modern accelerators. These challenges arise from the interaction between selection accuracy, sparsity structure, and hardware execution behavior.
+
+The first challenge is an inherent trade-off between selector efficiency and selection quality. Ideally, a selector would identify the true top-$k$ tokens based on the exact attention scores $qK^\top$ before the softmax operation. However, computing these scores requires scanning the entire KV cache, which largely negates the intended benefits of sparsity. Practical selectors therefore rely on approximated representations—such as pooling-based reductions, low-rank projections, or compressed token representations—to estimate token relevance~\cite{quest, seer, moba, ds}. While computationally efficient, these approximations are lossy and can lead to suboptimal token selection, ultimately degrading generation quality.
+
+The second challenge concerns hardware efficiency. Even when relevant tokens are estimated accurately, many sparse attention patterns induce irregular and non-contiguous memory accesses along the sequence dimension. Such access patterns disrupt memory coalescing on GPUs and significantly reduce effective memory bandwidth. As a result, the reduction in arithmetic computation enabled by sparsity is often offset by inefficient memory behavior, limiting end-to-end speedups during decoding~\cite{nsa}.
+
+Together, these challenges indicate that the effectiveness of sparse attention is governed not only by how many tokens are attended to, but also by which tokens are selected and how the resulting computation maps to accelerator hardware. Addressing this problem, therefore, requires a joint consideration of sparse pattern design and kernel-level implementation. Within this context, this proposal focuses on long-context autoregressive decoding and investigates the following research questions:
+
+\begin{itemize}
+\item \textbf{Sparse Pattern Design:} What classes of sparse attention patterns can preserve model quality while remaining compatible with efficient GPU execution during autoregressive decoding?
+\item \textbf{Kernel Implementation:} How can sparse attention kernels be designed to sustain high hardware utilization—particularly high effective memory bandwidth—under dynamic sparsity without degenerating to dense execution?
+\end{itemize}
+
+\section{Research Direction}
+This proposal targets practical sparse attention for long-context autoregressive decoding, and the central problem is that sparse attention is constrained by both (1) the selection-accuracy vs.\ selector-efficiency trade-off, and (2) the mismatch between sparse access patterns and GPU execution, especially memory coalescing and effective bandwidth. Consequently, the effectiveness of sparse attention is governed not only by how many tokens are attended to, but also by which tokens are selected and how the resulting computation maps to hardware. In the following sections, we analyze the trade-offs of existing sparse patterns and motivate a hybrid sparsity pattern that is designed to better balance selection accuracy with GPU-efficient execution.
+
+\subsection{Sparse Pattern Analysis}
+We analyze two representative classes of sparse attention patterns---\textbf{block-level sparsity} and \textbf{token-level sparsity}--- through the lens of the two core challenges above: selector efficiency vs.\ selection accuracy, and hardware compatibility.
+
+\subsubsection{Block-level sparsity}
+Block-level sparsity partitions the KV cache into contiguous blocks along the sequence dimension, where each block contains a fixed number of consecutive tokens. This pattern is attractive for GPU execution: selecting contiguous blocks preserves memory coalescing for global loads, reduces indexing overhead by operating at block granularity, and enables regular tile shapes for decoding kernels.
+
+A block-level sparsity also enables efficient selection via proxy representations: each block can be naturally reduced into a proxy key vector via mean or max pooling over keys within the block, and block relevance can be quickly approximated by the dot-product between the query vector and the proxy vector. The top-$k$ blocks are then selected for sparse attention.
+
+However, block-level sparsity can degrade selection quality for two reasons. First, pooled proxy scores can be misaligned with an oracle selection objective. An oracle block-importance criterion would aggregate token-level attention weights after the softmax. In contrast, pooling-based methods aggregate token representations before softmax and apply the nonlinearity afterward. Due to Jensen's inequality, the two are generally not equivalent:
+\begin{equation}
+\label{neq}
+    \mathbb{E}_{i \sim \text{Block}}[\exp(q \cdot k_i)] \neq \exp\left(q \cdot \mathbb{E}_{i \sim \text{Block}}[k_i]\right)
+\end{equation}
+This misalignment implies that efficient proxy scoring can lead to suboptimal block selection and therefore degrade generation quality.
+
+Also, the coarse granularity of block-level sparsity induces an intrinsic accuracy--efficiency trade-off via block size. Prior work\cite{moba2} suggests block-sparse accuracy is governed by an effective SNR scaling:
+\begin{equation}
+\label{snr}
+    \mathrm{SNR} \propto \sqrt{\frac{d}{B}}
+\end{equation}
+where $d$ is the head dimension and $B$ is the block size. This relationship highlights that, under a fixed architecture (fixed $d$), increasing $B$ improves kernel regularity and efficiency but reduces effective SNR, which can degrade downstream performance.
+
+\subsubsection{Token-level sparsity}
+Token-level sparsity corresponds to the limiting case $B=1$. Under the SNR scaling in Eq.~(\ref{snr}), this finer granularity \emph{can potentially} yield higher selection accuracy than block-level sparsity under a fixed sparsity budget. In practice, however, token-level sparsity typically incurs much higher selection overhead and is less well aligned with GPU execution.
+
+First, efficient and accurate token selection is difficult. Identifying the true top-$k$ tokens ideally requires computing dense $qK^\top$ over the full KV cache, which largely negates the benefits of sparsity. Moreover, unlike block-level sparsity, token-level selection does not naturally provide a cheap proxy representation. Practical selectors therefore rely on more aggressive approximations, such as clustering-based retrieval, low-rank or low-dimensional projections, channel pruning, and low-bit quantization. While these methods can reduce selector cost, they introduce additional approximation error and engineering complexity.
+
+Second, token-level sparsity typically induces irregular and non-contiguous access patterns along the sequence dimension. This leads to uncoalesced global memory loads and low effective bandwidth, and it complicates mapping computation to regular tiles, reducing hardware utilization during decoding.
+
+\subsection{Hybrid Sparsity Design and Implementation}
+
+Motivated by the analysis above, to solve the research questions outlined in Section~\ref{sec::problem}, this proposal explores a hybrid sparse attention design together with an implementation plan for efficient decoding. The central hypothesis is that combining a small amount of token-level selection with predominantly block-level sparsity can improve selection accuracy while largely preserving hardware-friendly memory access patterns.
+
+\subsubsection{Pattern Design}
+Empirical studies suggest that attention weights often exhibit a long-tailed distribution, where a small number of tokens account for a disproportionate fraction of the attention mass, while the remaining tokens contribute more diffusely. In such regimes, pure block-level sparsity can be brittle: pooling-based proxy scores may misrank blocks due to the softmax nonlinearity, as discussed in Eq.~(\ref{neq}).
+
+The hybrid design considered in this work explicitly separates these regimes. A small set of \textbf{high-impact tokens} is first included via a token-level mechanism. After removing these tokens from the candidate set, the residual attention mass is expected to be more evenly distributed across the remaining tokens, a regime in which block-level proxy scoring is likely to be more reliable. This structure preserves the advantages of block-level sparsity while mitigating its sensitivity to outliers.
+
+Although the design introduces a token-level component, the majority of selected tokens continue to be drawn from contiguous blocks. Consequently, the dominant memory accesses during sparse attention are expected to remain regular and largely coalesced, maintaining compatibility with efficient tiled decoding kernels and high effective memory bandwidth on GPUs.
+
+A key challenge of this hybrid pattern lies in the cost of identifying a very small number of token-level outliers. In general, selecting even a handful of tokens may require computations comparable to those needed to select a full token-level budget, potentially offsetting the efficiency gains of block-level sparsity.
+
+As an initial, low-overhead design point, this proposal considers replacing query-conditioned outlier detection with a static selection rule. Specifically, we adopt a small, fixed set of tokens derived from attention sinks~\cite{sink} as a proxy for globally important tokens. While this static approximation does not capture query-dependent importance, it enables exploration of the hybrid sparsity structure without incurring dense selector overhead. Investigating more adaptive yet lightweight alternatives for identifying high-impact tokens constitutes an important direction for subsequent research.
+
+\subsubsection{Kernel Implementations}
+To support the proposed hybrid sparsity pattern under autoregressive decoding, this proposal also investigates kernel-level designs that can sustain high effective memory bandwidth while accommodating dynamic sparsity. Rather than committing to a fixed implementation, we outline a set of design principles and candidate mechanisms that will guide kernel development and empirical evaluation.
+
+\paragraph{KV Cache Management}
+A key requirement of the hybrid pattern is a KV cache layout that simultaneously supports block-level reduction and contiguous token access. We therefore consider a paged view over a contiguous KV allocation~\cite{paged}, where the logical layout groups tokens into fixed-size pages aligned with the block size of the sparse pattern. Under decoding semantics, this representation admits a zero-copy view as a contiguous sequence, enabling reuse of existing decoding kernels and preserving memory coalescing for attention computation. An important aspect to be explored is how to integrate block-level reductions into cache updates with minimal overhead during both prefill and autoregressive decoding.
+
+\paragraph{Token Selection}
+Token and block selection rely on approximate relevance estimation over reduced KV representations. We plan to explore a GEMV-style proxy scoring kernel that overlaps memory access and computation with a double buffer, to maintain high hardware utilization even when batch sizes are small in long-context decoding.
+
+To efficiently support GQA, where multiple query heads share a KV head but may select different sparse regions, we consider representing selection results as compact block-level masks rather than variable-length index lists. Such representations allow efficient aggregation of per-head selections via bitwise operations and avoid explicit traversal or merging of irregular index structures. The impact of this choice on selector overhead and downstream kernel simplicity will be empirically evaluated.
+
+\paragraph{Sparse Attention Calculation}
+Given that dense attention computation in decoding is already highly optimized, the primary systems challenge under sparsity lies in materializing the token indices implied by selected blocks and explicit token-level picks. While index expansion is conceptually straightforward, naive implementations may introduce synchronization overheads or host-device interaction that dominate the runtime. A central question to be investigated is whether GPU-resident, fused index-materialization strategies—leveraging warp-level parallelism and prefix-style compaction—can support dynamic sparsity without eroding the gains from reduced attention computation.
+
+\section{Preliminary Results}
+This section presents preliminary empirical evidence supporting the feasibility of the proposed hybrid sparse attention approach. The goal of these experiments is not to provide a fully optimized system, but to validate the core design hypotheses at both the model and system levels, and to identify the primary bottlenecks that will guide subsequent research and optimization.
+
+\subsection{Experimental Setup}
+We conduct initial experiments using Llama-3.1-8B-Instruct~\cite{llama} as the base model. To evaluate long-context behavior under sparsity, we benchmark performance on LongBench~\cite{longbench}, selecting 16 representative tasks spanning Single-Document QA, Multi-Document QA, Summarization, Few-shot Learning, Synthetic Tasks, and Code Completion.
+
+System-level measurements are performed on a single NVIDIA RTX 3090 GPU (Ampere architecture, 82 SMs). All attention kernels are implemented and benchmarked using the FlashInfer library. We simulate a GQA configuration with 32 query heads and 8 key-value heads, and use a head dimension of $d=128$. Unless otherwise specified, experiments are conducted with a batch size of 1 to reflect latency-critical decoding scenarios.
+
+\begin{table}[t]
+\caption{\textbf{Model Accuracy on Longbench.} We select 16 widely adopted subsets of the Longbench to evaluate our method's accuracy; these subsets' length varies from 4k to 32k, and each contains 200 samples for evaluation.}
+\begin{threeparttable}
+\centering
+\resizebox{\textwidth}{!}{
+\label{tab::accuracy}
+\begin{tabular}{lcccccccccccccccc}
+\specialrule{1pt}{0pt}{2pt}
+\multirow{4}{*}{Sparisty} & \multicolumn{3}{c}{Single-Document QA} & \multicolumn{3}{c}{Multi-Document QA}& \multicolumn{3}{c}{Summarization}& \multicolumn{3}{c}{Few-shot Learning}& \multicolumn{2}{c}{Synthetic} & \multicolumn{2}{c}{Code} \\ \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}\cmidrule(lr){14-15}\cmidrule(lr){16-17}
+
+&\rotatebox[origin=c]{40}{NrtvQA} & \rotatebox[origin=c]{40}{Qasper} & \rotatebox[origin=c]{40}{MF-en} & \rotatebox[origin=c]{40}{HotpotQA} & \rotatebox[origin=c]{40}{2WikiMQA} & \rotatebox[origin=c]{40}{Musique} & \rotatebox[origin=c]{40}{GovReport} & \rotatebox[origin=c]{40}{QMSum} & \rotatebox[origin=c]{40}{MultiNews} & \rotatebox[origin=c]{40}{TREC} & \rotatebox[origin=c]{40}{TriviaQA} & \rotatebox[origin=c]{40}{SAMSum} & \rotatebox[origin=c]{40}{PCount} & \rotatebox[origin=c]{40}{PRe} & \rotatebox[origin=c]{40}{Lcc} & \rotatebox[origin=c]{40}{RB-P} \\
+\specialrule{1pt}{2pt}{5pt}
+
+Full Cache & 20.16 & 32.49 & 48.79 & 38.42 & 31.96 & 19.42 & 31.86 & 21.49 & 27.15 & 70.0 & 88.88 & 44.45 & 4.0 & 35.17 & 62.93 & 56.05 \\ % \cline{2-17}
+
+Budget:2048 & 21.52 & 39.04 & 48.98 & 38.29 & 32.13 & 19.36 & 31.81 & 21.32 & 26.95 & 70.0 & 89.15 & 44.38 & 4.5 & 35.0 & 64.57 & 58.21 \\ \specialrule{1pt}{2pt}{0pt}
+\end{tabular}}
+\end{threeparttable}
+\end{table}
+
+\subsection{Sparse Pattern Feasibility}
+We first examine whether the proposed hybrid sparsity pattern can preserve model behavior on long-context tasks under a constrained KV-cache budget. Using a budget of 2{,}048 tokens, the sparse model achieves performance comparable to the full-cache baseline across the majority of evaluated LongBench tasks, as shown in Table~\ref{tab::accuracy}. In several subsets, including NarrativeQA and Qasper, the sparse variant slightly outperforms the dense baseline.
+
+While these gains are modest, they suggest that selectively attending to a reduced set of salient tokens does not degrade—and may in some cases improve—long-context reasoning. One possible explanation is a contextual denoising effect, whereby sparsity suppresses irrelevant context and increases the effective signal-to-noise ratio seen by the model. Investigating when and why such effects arise remains an open research question.
+
+\subsection{Kernel Performance}
+\begin{wrapfigure}{r}{0.35\textwidth}
+  \centering
+  \includegraphics[width=0.3\textwidth]{viz.pdf}
+  \caption{Latency breakdown at 32k sequence length.}
+  \label{fig::latency}
+\end{wrapfigure}
+We next evaluate whether the hybrid sparsity pattern translates into practical efficiency gains during autoregressive decoding. Figure~\ref{fig::latency} reports an end-to-end latency breakdown at a sequence length of 32k tokens. Relative to the FlashInfer\cite{flashinfer} full-attention baseline, the sparse implementation achieves substantial speedups. With a KV-cache budget of 2{,}048 tokens, we observe a $3.13\times$ reduction in self-attention latency. Increasing the budget to 4{,}096 tokens still yields a $2.53\times$ speedup, indicating that the approach continues to provide meaningful benefits as the effective attention span grows.
+
+\subsection{Observed Bottlenecks}
+\label{sec::bottle}
+Profiling further reveals a critical bottleneck in the current implementation. Specifically, the expansion of block-level selections into per-token indices and metadata—required by the sparse attention kernel—can intermittently dominate end-to-end latency. In some cases, this expansion accounts for up to $7\times$ the runtime of the sparse attention kernel itself, substantially limiting overall speedup.
+
+This observation motivates several concrete research directions. A primary objective is to eliminate serial CPU-side index materialization by moving index construction entirely onto the GPU and, where possible, fusing it with the selection stage. One promising direction is to have the selection kernel directly emit the compact index structures consumed by the attention kernel, enabling parallel index generation and avoiding host-device synchronization. Additionally, warp-level primitives, such as prefix-sum-based compaction, will be explored to reduce synchronization overhead and improve intra-SM efficiency.
+
+Addressing this bottleneck is expected to significantly improve end-to-end scalability and represents a central systems challenge for the proposed research.
+
+\section{Research Plan and Timeline}
+The proposed research is organized into two phases. The first phase focuses on completing and consolidating the current system into a mature, publishable contribution. The second phase explores broader extensions of the hybrid sparsity paradigm, aiming to assess its generality and identify new research directions.
+
+\subsection{Phase I: System Completion and Evaluation}
+Phase I will focus on completing and consolidating the core sparse attention system proposed in this work. The primary technical objective is to eliminate the dominant performance bottleneck identified in Section~\ref{sec::bottle}, namely the overhead of index materialization under dynamic sparsity. Building on the existing implementation, this phase will investigate GPU-resident designs that fuse selection and index construction, enabling parallel generation of compact index structures without CPU-side intervention. Candidate approaches include warp-level prefix-sum-based compaction and mask-driven index generation to preserve the latency gains achieved by sparse attention at scale.
+
+Following bottleneck elimination, the optimized kernels will be integrated into end-to-end inference pipelines. The system will be evaluated within widely used \texttt{transformers} frameworks to assess its behavior under realistic decoding workloads. End-to-end evaluation will cover multiple model architectures, different sparsity budgets and block sizes, and benchmarks of different lengths, with a particular focus on decoding latency, effective memory bandwidth, and robustness across settings.
+
+The outcome of this phase will be a stable, end-to-end sparse attention system accompanied by comprehensive empirical validation. The results are expected to be consolidated into a research paper suitable for submission to a conference within approximately four months.
+
+\subsection{Phase II: Exploitation of Hybrid Sparsity}
+
+Phase II will explore broader extensions of the hybrid sparsity paradigm beyond the decoding-focused design considered in Phase I. In particular, this phase investigates whether sparse attention patterns should be differentiated between the \emph{prefill} and \emph{decode} stages, motivated by their fundamentally different computational characteristics and hardware constraints\cite{pd}.
+
+Autoregressive decoding and prefill exhibit distinct performance bottlenecks. Decoding is dominated by memory bandwidth and KV cache access, while prefill is compute-intensive and optimized around tensor-core-friendly dense or block-structured operations. This asymmetry suggests that a single sparsity pattern may be suboptimal across both stages, and that a stage-specific sparse design could yield better overall efficiency.
+
+During decoding, modern LLMs typically employ head dimensions of 128 or larger. Under standard FP16 precision, the memory footprint of a single token is often sufficient to satisfy memory coalescing requirements (128 bytes) on contemporary GPUs. This observation opens the possibility of employing fine-grained, token-level sparsity during decoding without incurring the severe memory inefficiencies traditionally associated with irregular access patterns. When combined with top-$p$ or similar selective criteria, token-level sparsity has the potential to achieve more aggressive KV cache reduction than block-level sparsity under the same quality constraints. The central challenge in this regime is the overhead of token selection. A promising research direction is to amortize or hide this overhead by compressing or preprocessing the KV cache during the prefill stage, thereby reducing the effective cost of token-level selection at decode time.
+
+In contrast, during the prefill stage, attention computation is primarily constrained by tensor-core execution requirements, which favor regular and block-structured computation. As a result, block-level sparse attention remains a more natural fit. This phase will explore whether emerging hardware capabilities—such as the \texttt{wgmma.async} primitive introduced in Nvidia Hopper GPUs—can be leveraged to overlap block-sparse attention computation with auxiliary operations such as KV cache compression. Such overlap could enable the prefill stage to prepare representations that are more amenable to efficient token-level sparsity during decoding, without degrading prefill throughput.
+
+Overall, Phase II aims to generalize the hybrid sparsity framework into a stage-aware sparse attention strategy that jointly considers model behavior, sparsity structure, and hardware execution across the full inference pipeline. This phase is exploratory in nature and is intended to identify promising directions for future sparse attention systems rather than to deliver a fully optimized implementation.
+
+\section{Conclusion}
+This proposal targets practical sparse attention for the long-context autoregressive decoding stage. It analyzes the limitations of existing block-level and token-level sparsity patterns and motivates a hybrid design that more effectively balances selection accuracy with hardware efficiency.
+
+Preliminary experiments demonstrate that the proposed hybrid sparsity preserves model performance while substantially reducing decoding latency. These experiments also identify index materialization as a key systems bottleneck. To address this issue, the proposed research will develop kernel-level optimizations and integrate the resulting design into end-to-end inference pipelines. In addition, the project will explore broader, stage-aware extensions of hybrid sparsity. Collectively, these efforts aim to bridge the gap between the theoretical benefits of sparsity and practical, hardware-efficient long-context inference.

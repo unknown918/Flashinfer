@@ -1324,7 +1324,7 @@ class SparseSinkAttentionWrapper:
 
         kv_indptr_host = kv_indptr.to("cpu", non_blocking=non_blocking)  # for split-kv binary search
 
-        self._paged_kv_indptr_buf = kv_indptr.cumsum(0)
+        self._paged_kv_indptr_buf = kv_indptr
         self._paged_kv_indices_buf = kv_indices
         self._paged_kv_last_page_len = torch.full(
             (num_kv_heads,),
@@ -1417,7 +1417,7 @@ class SparseSinkAttentionWrapper:
 
         q = einops.rearrange(
             q,
-            "(num_kv_heads gqa_group_size) qo_len head_dim -> num_kv_heads (qo_len gqa_group_size) head_dim",
+            "(num_kv_heads gqa_group_size) head_dim -> num_kv_heads (gqa_group_size) head_dim",
             num_kv_heads=self._num_kv_heads,
         ).contiguous()
 

@@ -24,7 +24,7 @@ using tvm::ffi::Tensor;
 void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_value,
                                    TensorView paged_k_cache, TensorView paged_v_cache,
                                    TensorView kv_indices, TensorView kv_indptr,
-                                   TensorView kv_last_page_len, int64_t layout,
+                                   TensorView kv_last_page_len, uint32_t sink, int64_t layout,
                                    TensorView pooling) {
   CHECK_CONTIGUOUS(pooling)
   CHECK_LAST_DIM_CONTIGUOUS(append_key);
@@ -96,7 +96,7 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
     cudaError_t status = AppendPagedKVCachePrefill(
         paged_kv, static_cast<c_type*>(append_key.data_ptr()),
         static_cast<c_type*>(append_value.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
-        seq_len, append_k_stride_n, append_k_stride_h, append_v_stride_n, append_v_stride_h,
+        seq_len, sink, append_k_stride_n, append_k_stride_h, append_v_stride_n, append_v_stride_h,
         pooling_stride_n, pooling_stride_h, stream);
     TVM_FFI_ICHECK(status == cudaSuccess)
         << "AppendPagedKVCachePrefill failed with error: " << cudaGetErrorString(status);
@@ -145,12 +145,12 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
 
   unsigned int num_heads, page_size, head_dim;
   head_dim = paged_k_cache.size(3);
-  if (kv_layout == QKVLayout::kHND) {
+  if (kv_layout == QKVLayout::kNHD) {
+    page_size = paged_k_cache.size(1);
+    num_heads = paged_k_cache.size(2);
+  } else if (kv_layout == QKVLayout::kHND) {
     num_heads = paged_k_cache.size(1);
     page_size = paged_k_cache.size(2);
-  } else if (kv_layout == QKVLayout::kNHD) {
-    num_heads = paged_k_cache.size(2);
-    page_size = paged_k_cache.size(1);
   }
 
   // get kv_cache_strides
