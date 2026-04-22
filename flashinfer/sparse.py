@@ -702,6 +702,58 @@ class BlockSparseAttentionWrapper:
         pass
 
 
+# HND kv layout: [num_kv_heads, num_blocks, block_size, head_dim]
+# padded into: [num_kv_heads * num_blocks, block_size, 1, head_dim]
+# for customized attention mask for each kv_head
+# NOTE(Yilong): This could be perf bottleneck. Consider Triton implementation.
+def _block_mask_map_to_expanded_indices(
+        block_mask_map: torch.Tensor,  # [H, R, C] bool / {0,1}
+        block_col_sz: torch.Tensor,  # [H, C]     int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        block_mask_map:  bool/int  [num_kv_heads, num_blocks_row, num_blocks_col]
+        block_col_sz:    int32/64  [num_kv_heads, num_blocks_col]
+    Returns:
+        kv_indptr:  [H*R + 1]  int32  —  CSR indptr
+        kv_indices: [nnz]      int32  —  token indices per (head, row)
+    """
+    device = block_mask_map.device
+    dtype_i = torch.int32
+
+    # 1) Calculate the total length of each row (head, row)
+    row_lengths = (block_mask_map * block_col_sz[:, None, :]).sum(-1)  # [H,R]
+    kv_indptr = torch.cat(
+        [
+            torch.zeros(1, dtype=dtype_i, device=device),
+            torch.cumsum(row_lengths.flatten(), 0),
+        ],
+        dim=0,
+    )
+
+    # 2) Calculate the offset of each column block within its head
+    col_offset = (
+            torch.cumsum(block_col_sz.to(dtype_i), 1) - block_col_sz
+    )  # [H,C]
+    head_len = block_col_sz.sum(1, dtype=dtype_i)
+    head_offset = torch.cumsum(head_len, 0) - head_len
+
+    # 3) Find all selected (h,r,c)
+    h_idx, r_idx, c_idx = block_mask_map.nonzero(as_tuple=True)
+    lengths = block_col_sz[h_idx, c_idx].to(dtype_i)  # [N]
+    base = head_offset[h_idx] + col_offset[h_idx, c_idx]  # [N]
+
+    # 4) Expand variable-length column blocks into token-level indices
+    cum = torch.cumsum(lengths, 0)
+    starts = torch.repeat_interleave(cum - lengths, lengths)  # [total]
+    offsets_within = torch.arange(cum[-1], device=device) - starts
+    kv_indices = torch.repeat_interleave(base, lengths) + offsets_within
+
+    return kv_indptr.to(dtype=dtype_i, device=device), kv_indices.to(
+        dtype=dtype_i, device=device
+    )
+
+
 class VariableBlockSparseAttentionWrapper:
     r"""Wrapper class for attention computation with a block-sparse matrix as attention mask.
     This API supports variable block sizes provided by ``block_row_sz`` and ``block_col_sz``.
@@ -907,57 +959,6 @@ class VariableBlockSparseAttentionWrapper:
             dtype=torch.int32,
             device=block_mask_map.device,
         )  # We use page_size == 1 for variable length support
-
-        # HND kv layout: [num_kv_heads, num_blocks, block_size, head_dim]
-        # padded into: [num_kv_heads * num_blocks, block_size, 1, head_dim]
-        # for customized attention mask for each kv_head
-        # NOTE(Yilong): This could be perf bottleneck. Consider Triton implementation.
-        def _block_mask_map_to_expanded_indices(
-                block_mask_map: torch.Tensor,  # [H, R, C] bool / {0,1}
-                block_col_sz: torch.Tensor,  # [H, C]     int
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
-            """
-            Args:
-                block_mask_map:  bool/int  [num_kv_heads, num_blocks_row, num_blocks_col]
-                block_col_sz:    int32/64  [num_kv_heads, num_blocks_col]
-            Returns:
-                kv_indptr:  [H*R + 1]  int32  —  CSR indptr
-                kv_indices: [nnz]      int32  —  token indices per (head, row)
-            """
-            device = block_mask_map.device
-            dtype_i = torch.int32
-
-            # 1) Calculate the total length of each row (head, row)
-            row_lengths = (block_mask_map * block_col_sz[:, None, :]).sum(-1)  # [H,R]
-            kv_indptr = torch.cat(
-                [
-                    torch.zeros(1, dtype=dtype_i, device=device),
-                    torch.cumsum(row_lengths.flatten(), 0),
-                ],
-                dim=0,
-            )
-
-            # 2) Calculate the offset of each column block within its head
-            col_offset = (
-                    torch.cumsum(block_col_sz.to(dtype_i), 1) - block_col_sz
-            )  # [H,C]
-            head_len = block_col_sz.sum(1, dtype=dtype_i)
-            head_offset = torch.cumsum(head_len, 0) - head_len
-
-            # 3) Find all selected (h,r,c)
-            h_idx, r_idx, c_idx = block_mask_map.nonzero(as_tuple=True)
-            lengths = block_col_sz[h_idx, c_idx].to(dtype_i)  # [N]
-            base = head_offset[h_idx] + col_offset[h_idx, c_idx]  # [N]
-
-            # 4) Expand variable-length column blocks into token-level indices
-            cum = torch.cumsum(lengths, 0)
-            starts = torch.repeat_interleave(cum - lengths, lengths)  # [total]
-            offsets_within = torch.arange(cum[-1], device=device) - starts
-            kv_indices = torch.repeat_interleave(base, lengths) + offsets_within
-
-            return kv_indptr.to(dtype=dtype_i, device=device), kv_indices.to(
-                dtype=dtype_i, device=device
-            )
 
         kv_indptr, kv_indices = _block_mask_map_to_expanded_indices(
             block_mask_map, block_col_sz
@@ -1240,7 +1241,6 @@ class SparseSinkAttentionWrapper:
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
         )
-
         self._kv_lens_buffer = torch.empty(
             (32768,), dtype=torch.int32, device=self.device
         )
@@ -1250,6 +1250,7 @@ class SparseSinkAttentionWrapper:
             pin_memory=True,
             device="cpu",
         )
+        self._cached_module = None
         self._use_cuda_graph = False
         self._kv_layout = "NHD"
         self._qo_indptr: Optional[torch.Tensor] = None
@@ -1390,7 +1391,7 @@ class SparseSinkAttentionWrapper:
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
-            out: Optional[torch.Tensor] = None,
+            out: torch.Tensor = None,
             lse: Optional[torch.Tensor] = None,
             return_lse: bool = False,
             enable_pdl: Optional[bool] = None,
@@ -1422,6 +1423,7 @@ class SparseSinkAttentionWrapper:
         ).contiguous()
 
         # k and v are allocated to store max_length tokens,non-seq value is set to zero
+        # NHD: [max_num_pages, page_size, num_kv_heads, head_dim]
         k = einops.rearrange(
             k,
             "num_pages page_size num_kv_heads head_dim -> (num_pages page_size num_kv_heads) 1 1 head_dim",
@@ -1430,9 +1432,6 @@ class SparseSinkAttentionWrapper:
             v,
             "num_pages page_size num_kv_heads head_dim -> (num_pages page_size num_kv_heads) 1 1 head_dim",
         ).contiguous()
-
-        if out is None:
-            out = torch.empty_like(q, dtype=self._o_dtype)
 
         sparse_indices = self._paged_kv_indices_buf
         sparse_indptr = self._paged_kv_indptr_buf
@@ -1458,11 +1457,5 @@ class SparseSinkAttentionWrapper:
             rope_scale,
             rope_theta,
         )
-
-        out = einops.rearrange(
-            out,
-            "num_kv_heads gqa_group_size head_dim -> (num_kv_heads gqa_group_size) head_dim",
-            num_kv_heads=self._num_kv_heads,
-        ).contiguous()
 
         return out

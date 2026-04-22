@@ -24,8 +24,9 @@ using tvm::ffi::Tensor;
 void estimate(TensorView q, TensorView pooling, uint32_t seq_len, TensorView out) {
   CHECK_CONTIGUOUS(pooling)
   CHECK_CONTIGUOUS(out)
-  CHECK_DIM(3, pooling);
   CHECK_DIM(2, out);
+  CHECK_DIM(2, q);
+  CHECK_DIM(3, pooling);
 
   unsigned int num_qo_heads, num_kv_heads, head_dim, num_pages;
 

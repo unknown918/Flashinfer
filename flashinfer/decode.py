@@ -354,19 +354,18 @@ def get_decode_estimate_module():
 
 
 def estimate(
-        seq_len: int,
         query: torch.Tensor,
+        out: torch.Tensor,
         pooling: torch.Tensor,
-        out: torch.Tensor
-) -> torch.Tensor:
+        seq_len: int,
+) -> None:
+    # estimate(TensorView q, TensorView pooling, uint32_t seq_len, TensorView out)
     get_decode_estimate_module().estimate(
         query,
         pooling,
         seq_len,
         out
     )
-
-    return out
 
 
 @overload

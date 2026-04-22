@@ -16,7 +16,7 @@ q = torch.randn(num_qo_heads, head_dim).half().to(0)
 pooling = torch.randn(num_total_pages, num_kv_heads, head_dim).half().to(0)
 out = torch.zeros(num_qo_heads, num_total_pages).half().to(0)
 
-out = flashinfer.decode.estimate(
+flashinfer.decode.estimate(
     seq_len,
     q,
     pooling,

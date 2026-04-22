@@ -3,6 +3,15 @@ import flashinfer
 
 torch.manual_seed(42)
 
+
+def assert_close(a, b):
+    rtol, atol = {
+        torch.float16: (1e-3, 1e-3),
+        torch.bfloat16: (1e-4, 1e-4),
+    }[a.dtype]
+    torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
+
+
 topk = 16
 page_size = 16
 seq_len = 2054
@@ -30,9 +39,11 @@ block_col_sz = block_col_sz.unsqueeze(0).repeat(num_kv_head, 1)
 block_mask_map = torch.zeros(num_kv_head, 1, num_blocks_col, dtype=torch.int32)
 
 indices = torch.topk(logits[:, :num_valid_pages - 1], k=topk - 1).indices.to("cpu")
+indices += 1
 for i in range(num_kv_head):
     for j in range(group_size):
-        block_mask_map[i, 0, indices[i * j + j]] = 1
+        block_mask_map[i, 0, indices[i * group_size + j]] = 1
+    block_mask_map[i, 0, 0] = 1  # sink tokens
     block_mask_map[i, 0, -1] = 1  # always select last page
 
 q = torch.randn(num_qo_head, 1, head_dim, dtype=torch.half, device="cuda")
@@ -54,7 +65,7 @@ sparse_wrapper_fa2.plan(
     num_kv_heads=num_kv_head,
     head_dim=head_dim,
     q_data_type=torch.half,
-)
+)  # info: [56, 8, 0, 16, 0, 224, 448, 720, 672, 708, 0, 1835008, 768, 0, 1]
 
 attn_ref = sparse_wrapper_fa2.run(q, k, v)
 
@@ -97,17 +108,17 @@ decode_wrapper.plan(
     num_kv_heads=num_kv_head,
     head_dim=head_dim,
     causal=True
-)
+)  # info: [56, 0, 114688, 0, 224, 448, 688, 676, 0, 1]
 
 q = q.transpose(0, 1).contiguous()[0]
 k = k.transpose(0, 1).unsqueeze(1).contiguous()
 v = v.transpose(0, 1).unsqueeze(1).contiguous()
-
 attn_out = decode_wrapper.run(
     q=q,
     k=k,
     v=v,
+    out=torch.zeros(num_qo_head, head_dim, dtype=torch.float16, device="cuda:0"),
     return_lse=False
 )
 
-torch.testing.assert_close(attn_out, attn_ref[:, 0])
+assert_close(attn_out, attn_ref[:, 0])

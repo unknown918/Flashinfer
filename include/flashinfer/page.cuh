@@ -239,12 +239,13 @@ __global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_k
   uint32_t head_idx = ty;
   uint32_t sink = 4U;
 
-  uint32_t seq_len = (paged_kv.indptr[1] - 1) * paged_kv.page_size + paged_kv.last_page_len[0];
+  // previous token count
+  uint32_t seq_len = (paged_kv.indptr[1] - 1) * paged_kv.page_size + paged_kv.last_page_len[0] - 1;
 
-  uint32_t page_iter = (seq_len - 1) / paged_kv.page_size;
-  uint32_t entry_idx = (seq_len - 1) % paged_kv.page_size;
-  uint32_t pooling_iter = (seq_len - 1 - sink) / paged_kv.page_size;
-  uint32_t pooling_entry = (seq_len - 1 - sink) % paged_kv.page_size;
+  uint32_t page_iter = seq_len / paged_kv.page_size;
+  uint32_t entry_idx = seq_len % paged_kv.page_size;
+  uint32_t pooling_iter = (seq_len - sink) / paged_kv.page_size;
+  uint32_t pooling_entry = (seq_len - sink) % paged_kv.page_size;
 
   DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
   DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
@@ -252,16 +253,13 @@ __global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_k
   // Key reduction
   vec_t<DType, vec_size> local_k, local_pool;
   local_k.cast_load(key + head_idx * head_dim + tx * vec_size);
-  if (pooling_entry == 0) {
+  if (pooling_entry == 0)
     local_pool.fill(static_cast<DType>(0.0));
-  } else {
-    local_pool.cast_load(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h +
-                         tx * vec_size);
-  }
+  else
+    local_pool.cast_load(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h + tx * vec_size);
   vec_reduce<DType, vec_size>(local_pool, local_k);
   local_k.cast_store(k_ptr);
-  local_pool.cast_store(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h +
-                        tx * vec_size);
+  local_pool.cast_store(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h + tx * vec_size);
   vec_t<DType, vec_size>::memcpy(v_ptr, value + head_idx * head_dim + tx * vec_size);
 }
 
@@ -290,7 +288,7 @@ __global__ void AppendPagedKVCachePrefillKernel(
   uint32_t begin_idx = ty;
   uint32_t page_size = paged_kv.page_size;
 
-  uint32_t page_nums = paged_kv.indptr[1] - static_cast<uint32_t>(paged_kv.last_page_len[0] <= sink);
+  uint32_t page_iters = paged_kv.indptr[1] - static_cast<uint32_t>(paged_kv.last_page_len[0] <= sink);
 
   if (ty < sink) {
     DType* k_ptr = paged_kv.get_k_ptr(0, head_idx, ty, tx * vec_size);
@@ -301,7 +299,7 @@ __global__ void AppendPagedKVCachePrefillKernel(
 
 #pragma unroll 4
   // logical page, sink tokens will cause 4 shift to actual value
-  for (uint32_t page_idx = begin_idx; page_idx < page_nums; page_idx += stride) {
+  for (uint32_t page_idx = begin_idx; page_idx < page_iters; page_idx += stride) {
     uint32_t entry_start_idx = 0U;  // prefill, can assure start from 0
     uint32_t entry_end_idx = min(page_size, seq_len - sink - page_idx * page_size);
 

@@ -37,7 +37,7 @@ class AttentionRunner:
             device=device
         )
         self.mask_logits = torch.zeros(
-            num_qo_heads // self.group_size, max_length,
+            num_kv_heads, max_length,
             dtype=torch.int32,
             device=device
         )
@@ -45,10 +45,10 @@ class AttentionRunner:
         num_pages = int((max_length + page_size - 1) / page_size)
 
         # decode wrapper and buffers
-        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+        self.logits = torch.zeros(num_qo_heads, num_pages, dtype=dtype, device=device).contiguous()
+        self.output = torch.zeros(num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
+        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device).contiguous()
         self.decode_wrapper = flashinfer.SparseSinkAttentionWrapper(workspace_buffer)
-        self.logits = torch.zeros(num_qo_heads, num_pages, dtype=dtype, device=device)
-        self.out = torch.zeros(num_qo_heads, head_dim, dtype=dtype, device=device)
 
         # paged kv cache manager
         self.cache_manager = PagedKVCache(
@@ -64,12 +64,8 @@ class AttentionRunner:
         )
 
     def prefill(self, layer_id: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        q, k = flashinfer.apply_llama31_rope(
-            q,
-            k,
-            torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device),
-            torch.tensor([0], dtype=torch.int32, device=q.device),
-        )
+        if layer_id == 0:
+            self.cache_manager.seq_len += q.shape[0]
 
         self.cache_manager.append_page_prefill(layer_id, k, v)
 
@@ -82,23 +78,33 @@ class AttentionRunner:
             return_lse=False
         )
 
-    def decode(self, layer_id: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        q, k = flashinfer.apply_llama31_rope(
-            q.unsqueeze(0),
-            k.unsqueeze(0),
-            torch.tensor([0, 1], dtype=torch.int32, device=q.device),
-            torch.tensor([self.cache_manager.seq_len], dtype=torch.int32, device=q.device),
-        )
-
+    def decode(
+            self, layer_id: int,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+    ) -> torch.Tensor:
         # TODO: could use a cuda graph to replay this process
-        self.cache_manager.append_page_decode(layer_id, k[0], v)
+        if layer_id == 0:  # no sparse
+            self.cache_manager.seq_len += 1
+        if layer_id < 2:
+            self.cache_manager.append_page_decode(layer_id, k, v)
+            self.output = flashinfer.decode.single_decode_with_kv_cache(
+                q,
+                self.cache_manager.paged_k_cache[layer_id].reshape(
+                    -1, self.cache_manager.num_kv_heads, self.cache_manager.head_dim
+                ),
+                self.cache_manager.paged_v_cache[layer_id].reshape(
+                    -1, self.cache_manager.num_kv_heads, self.cache_manager.head_dim
+                ),
+            )
+            return self.output
 
-        # fixme: sometimes got zero logits?
-        self.logits = flashinfer.decode.estimate(
-            seq_len=self.cache_manager.current_pages,
-            query=q[0],
+        flashinfer.decode.estimate(
+            query=q,
+            out=self.logits,
             pooling=self.cache_manager.pooling[layer_id] / 32,
-            out=self.logits
+            seq_len=self.cache_manager.current_pages,
         )
 
         num_valid_pages = (self.cache_manager.seq_len - 4 + self.page_size - 1) // self.page_size
@@ -117,6 +123,7 @@ class AttentionRunner:
             mask_logits=self.mask_logits
         )
         self.indptr = self.indptr.cumsum(dim=0, dtype=torch.int32)
+
         # split-K and other stuff
         self.decode_wrapper.plan(
             kv_indptr=self.indptr,
@@ -127,16 +134,17 @@ class AttentionRunner:
             causal=True
         )
 
-        attn_output = self.decode_wrapper.run(
-            q=q[0],
+        self.decode_wrapper.run(
+            q=q,
             k=self.cache_manager.paged_k_cache[layer_id],
             v=self.cache_manager.paged_v_cache[layer_id],
-            out=self.out,
+            out=self.output,
             return_lse=False
         )
 
         self.indptr.zero_()
         self.indices.zero_()
         self.logits.zero_()
+        self.mask_logits.zero_()
 
-        return attn_output
+        return self.output

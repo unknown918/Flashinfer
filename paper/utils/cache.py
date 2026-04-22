@@ -52,8 +52,6 @@ class PagedKVCache:
         ).contiguous()
 
     def append_page_prefill(self, layer_id: int, k: torch.Tensor, v: torch.Tensor):
-        self.seq_len = k.shape[0]
-
         self.current_pages = (self.seq_len + self.page_size - 1) // self.page_size
         self.kv_page_indptr[1] = self.current_pages
         self.kv_page_indices = torch.arange(self.current_pages, dtype=torch.int32, device=self.device)
@@ -73,13 +71,18 @@ class PagedKVCache:
         )
 
     def append_page_decode(self, layer_id: int, k: torch.Tensor, v: torch.Tensor):
-        if layer_id == 0:
-            self.seq_len += 1
-
         self.current_pages = (self.seq_len + self.page_size - 1) // self.page_size
         self.kv_page_indptr[1] = self.current_pages
         last_page_len = self.seq_len - ((self.current_pages - 1) * self.page_size)
         kv_last_page_len = torch.tensor([last_page_len], dtype=torch.int32, device=self.device)
+
+        if last_page_len == 1:
+            self.kv_page_indices = torch.cat(
+                [
+                    self.kv_page_indices,
+                    torch.tensor([self.current_pages - 1], device=self.device)
+                ], dim=0
+            )
 
         flashinfer.append_paged_kv_cache_decode(
             k,

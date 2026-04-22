@@ -1,11 +1,11 @@
 import torch
 import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from patch_llama import LlamaForCausalLM
+from models.llama import LlamaForCausalLM
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
-device = torch.device("cuda:2")
+device = torch.device("cuda:7")
 model_id = "../Llama-3.1-8B-Instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -18,8 +18,12 @@ model = AutoModelForCausalLM.from_pretrained(
 model.eval()
 with open("prompt.txt", 'r', encoding='utf-8') as f:
     prompt = f.read()
+
 messages = [
-    {"role": "user", "content": f"{prompt}\nRead this paper, and tell me who are you.\n"},
+    {
+        "role": "user",
+        "content": f"{prompt}\nPlease, can you read this paper carefully, and give me a brief summary.\n"
+    },
 ]
 
 input_ids = tokenizer.apply_chat_template(
@@ -32,7 +36,7 @@ print("Sequence Length: ", input_ids.shape[1])
 
 generated_outputs = model.generate(
     input_ids,
-    max_new_tokens=1,
+    max_new_tokens=100,
     do_sample=False,
     temperature=0,
     pad_token_id=tokenizer.eos_token_id

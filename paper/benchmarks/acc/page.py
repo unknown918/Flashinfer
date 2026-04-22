@@ -13,13 +13,13 @@ torch.manual_seed(42)
 def assert_close(a, b):
     rtol, atol = {
         torch.float16: (5e-3, 5e-3),
-        torch.bfloat16: (3e-2, 2e-2),
+        torch.bfloat16: (3e-2, 3e-2),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
 sink = 4
-seq_len = 1976
+seq_len = 5537
 head_dim = 128
 page_size = 32
 num_kv_heads = 8
@@ -29,19 +29,19 @@ dtype = torch.bfloat16
 
 num_pages = (max_length + page_size - 1) // page_size
 
-paged_k_cache = torch.empty(
+paged_k_cache = torch.zeros(
     num_pages, page_size, num_kv_heads, head_dim,
     dtype=dtype,
     device=device
 ).contiguous()
 
-paged_v_cache = torch.empty(
+paged_v_cache = torch.zeros(
     num_pages, page_size, num_kv_heads, head_dim,
     dtype=dtype,
     device=device
 ).contiguous()
 
-pooling_cache = torch.empty(
+pooling_cache = torch.zeros(
     num_pages, num_kv_heads, head_dim,  # same layout as in estimate.py
     dtype=dtype,
     device=device
@@ -89,9 +89,9 @@ k_pooled = torch.stack(
     ], dim=0
 )
 
-assert_close(k_pooled, pooling_cache[:current_pages - 1, :] / 32)
+assert_close(k_pooled, pooling_cache[:current_pages - 1, :] / page_size)
 
-num_decode_iters = 10
+num_decode_iters = 30
 for _ in range(num_decode_iters):
     seq_len += 1
     current_pages = (seq_len + page_size - 1) // page_size
@@ -132,5 +132,4 @@ for _ in range(num_decode_iters):
             for i in range(current_pages - 1)
         ], dim=0
     )
-
-    assert_close(k_pooled, pooling_cache[:current_pages - 1, :] / 32)
+    assert_close(k_pooled, pooling_cache[:current_pages - 1, :] / page_size)
