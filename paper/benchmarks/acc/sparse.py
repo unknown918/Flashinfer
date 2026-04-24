@@ -65,7 +65,7 @@ sparse_wrapper_fa2.plan(
     num_kv_heads=num_kv_head,
     head_dim=head_dim,
     q_data_type=torch.half,
-)  # info: [56, 8, 0, 16, 0, 224, 448, 720, 672, 708, 0, 1835008, 768, 0, 1]
+)
 
 attn_ref = sparse_wrapper_fa2.run(q, k, v)
 
@@ -108,7 +108,7 @@ decode_wrapper.plan(
     num_kv_heads=num_kv_head,
     head_dim=head_dim,
     causal=True
-)  # info: [56, 0, 114688, 0, 224, 448, 688, 676, 0, 1]
+)
 
 q = q.transpose(0, 1).contiguous()[0]
 k = k.transpose(0, 1).unsqueeze(1).contiguous()
@@ -121,4 +121,5 @@ attn_out = decode_wrapper.run(
     return_lse=False
 )
 
+torch.testing.assert_close(sparse_wrapper_fa2._paged_kv_indptr_buf, _indptr.to(torch.int32))
 assert_close(attn_out, attn_ref[:, 0])

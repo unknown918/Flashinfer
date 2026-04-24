@@ -1,7 +1,7 @@
 import torch
 import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from models.llama import LlamaForCausalLM
+from models.llama_ import LlamaForCausalLM
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 

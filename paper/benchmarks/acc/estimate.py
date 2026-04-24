@@ -17,10 +17,10 @@ pooling = torch.randn(num_total_pages, num_kv_heads, head_dim).half().to(0)
 out = torch.zeros(num_qo_heads, num_total_pages).half().to(0)
 
 flashinfer.decode.estimate(
-    seq_len,
     q,
+    out,
     pooling,
-    out
+    seq_len,
 )
 
 pooling = pooling.repeat_interleave(4, dim=1)

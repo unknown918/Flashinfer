@@ -20,6 +20,7 @@
 from typing import Callable, Optional, Union
 
 import torch
+import torch.utils.checkpoint
 from torch import nn
 
 from transformers.activations import ACT2FN
@@ -27,24 +28,21 @@ from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.integrations import use_kernel_forward_from_hub
 from transformers.masking_utils import create_causal_mask
-from transformers.modeling_layers import (
-    GenericForQuestionAnswering,
-    GenericForSequenceClassification,
-    GenericForTokenClassification,
-    GradientCheckpointingLayer,
-)
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
+    QuestionAnsweringModelOutput,
+    SequenceClassifierOutputWithPast,
+    TokenClassifierOutput,
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
-from transformers.utils.deprecation import deprecate_kwarg
-from transformers.utils.generic import check_model_inputs
+from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
 from transformers.models.llama.configuration_llama import LlamaConfig
-from paper.utils.attention import AttentionRunner
+from torch.profiler import record_function
 
 logger = logging.get_logger(__name__)
 
@@ -71,12 +69,10 @@ class LlamaRMSNorm(nn.Module):
 
 
 class LlamaRotaryEmbedding(nn.Module):
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
-
     def __init__(self, config: LlamaConfig, device=None):
         super().__init__()
         # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
             self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
         else:
             self.rope_type = "default"
@@ -176,7 +172,7 @@ def eager_attention_forward(
         attention_mask: Optional[torch.Tensor],
         scaling: float,
         dropout: float = 0.0,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs,
 ):
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
@@ -220,17 +216,15 @@ class LlamaAttention(nn.Module):
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
 
-    @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attention_runner: AttentionRunner,
             position_embeddings: tuple[torch.Tensor, torch.Tensor],
             attention_mask: Optional[torch.Tensor],
-            past_key_values: Optional[Cache] = None,
+            past_key_value: Optional[Cache] = None,
             cache_position: Optional[torch.LongTensor] = None,
-            **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+            **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -241,19 +235,16 @@ class LlamaAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if past_key_values is not None:
+        if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         do_sparse: bool = query_states.shape[2] == 1 and self.layer_idx > 1
 
         import flashinfer
 
+        # qkv states shape: (batch_size, num_heads, seq_len, head_dim)
         if do_sparse:
             sink = 4
             page_size = 32
@@ -261,13 +252,13 @@ class LlamaAttention(nn.Module):
             assert batch_size == 1
             num_qo_heads = query_states.shape[1]
             assert num_qo_heads % num_kv_heads == 0
-            num_groups = num_qo_heads // num_kv_heads
+            group_size = num_qo_heads // num_kv_heads
             device = query_states.device
             num_blocks = (seq_len - sink + page_size - 1) // page_size
             top_k = 16
 
             pooling = torch.stack([
-                key_states[:, :, sink + i * page_size: min((i + 1) * page_size, seq_len)].sum(dim=2)
+                key_states[:, :, sink + i * page_size: min((i + 1) * page_size, seq_len)].mean(dim=2)
                 for i in range(num_blocks)
             ], dim=2)
 
@@ -278,8 +269,8 @@ class LlamaAttention(nn.Module):
             block_col_sz = torch.zeros(num_blocks_col, dtype=torch.int32)
             block_col_sz[0] = 4
             block_col_sz[-1] = last_page_len
-            _logits = torch.zeros(num_qo_heads, 1024, dtype=torch.bfloat16, device="cuda:7")
-            grouped_query = query_states[:, :, -1, :].reshape(batch_size, num_kv_heads, num_groups, head_dim)
+            _logits = torch.zeros(num_qo_heads, 1024, dtype=torch.float32, device=device)
+            grouped_query = query_states[:, :, -1, :].reshape(batch_size, num_kv_heads, group_size, head_dim)
             logits = torch.einsum("bgmd,bgnd->bgmn", grouped_query, pooling)[0].reshape(-1, num_valid_pages)
             _logits[:, :num_valid_pages] = logits
 
@@ -292,9 +283,8 @@ class LlamaAttention(nn.Module):
             indices = torch.topk(_logits[:, :num_valid_pages - 1], k=top_k - 1).indices.to("cpu")
             indices += 1
             for i in range(num_kv_heads):
-                grouped_indices = torch.unique(indices[i * num_groups:(i + 1) * num_groups])
-                for j in range(num_groups):
-                    block_mask_map[i, 0, grouped_indices] = 1
+                for j in range(group_size):
+                    block_mask_map[i, 0, indices[i * group_size + j]] = 1
                 block_mask_map[i, 0, 0] = 1  # sink tokens
                 block_mask_map[i, 0, -1] = 1  # always select last page
 
@@ -307,6 +297,7 @@ class LlamaAttention(nn.Module):
                 num_qo_heads,
                 num_kv_heads,
                 head_dim,
+                causal=True,
                 q_data_type=torch.bfloat16
             )
             attn_output = wrapper.run(
@@ -316,6 +307,55 @@ class LlamaAttention(nn.Module):
                 return_lse=False
             )
 
+            # test custom wrapper
+            indptr = torch.zeros(
+                1 + num_kv_heads,
+                dtype=torch.uint32,
+                device=device
+            )
+            indices = torch.zeros(
+                num_kv_heads * (4 + top_k * group_size * page_size),
+                dtype=torch.uint32,
+                device=device
+            )
+            mask_logits = torch.zeros(
+                num_kv_heads, 1024,  # num_total_pages
+                dtype=torch.uint32,
+                device=device
+            )
+
+            _indptr, _indices = flashinfer.topk_bool_mask_logits(
+                topk=top_k - 1,
+                page_size=page_size,
+                group_size=group_size,
+                last_page_len=last_page_len,
+                num_valid_pages=num_valid_pages - 1,  # always select last page
+                logits=_logits,
+                indptr=indptr,
+                indices=indices,
+                mask_logits=mask_logits
+            )
+
+            _indptr = _indptr.cumsum(dim=-1)
+            _workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+            decode_wrapper = flashinfer.SparseSinkAttentionWrapper(_workspace_buffer)
+
+            decode_wrapper.plan(
+                kv_indptr=_indptr.to(torch.int32),
+                kv_indices=_indices.to(torch.int32),
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                causal=True
+            )
+            _attn_output = decode_wrapper.run(
+                q=query_states[0, :, 0, :].contiguous(),
+                k=key_states[0].transpose(0, 1).unsqueeze(1).contiguous(),
+                v=value_states[0].transpose(0, 1).unsqueeze(1).contiguous(),
+                out=torch.zeros(num_qo_heads, head_dim, dtype=torch.bfloat16, device=device),
+                return_lse=False
+            )
+            # torch.testing.assert_close(attn_output, _attn_output, atol=3e-2, rtol=3e-2)
             attn_output = attn_output.transpose(0, 1).unsqueeze(0)
             attn_output = attn_output.reshape(*input_shape, -1)
             attn_output = self.o_proj(attn_output)
@@ -323,20 +363,16 @@ class LlamaAttention(nn.Module):
             return attn_output, None
         else:
             # print(query_states.transpose(1, 2)[0].shape)
-            attn_output, attn_weights = attention_interface(
-                self,
-                query_states,
-                key_states,
-                value_states,
-                attention_mask,
-                dropout=0.0 if not self.training else self.attention_dropout,
-                scaling=self.scaling,
-                **kwargs,
+            attn_output = flashinfer.single_prefill_with_kv_cache(
+                query_states.transpose(1, 2)[0],
+                key_states.transpose(1, 2)[0],
+                value_states.transpose(1, 2)[0],
+                causal=True
             )
-
-            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            # print("attn_output shape", attn_output.shape)
+            attn_output = attn_output.reshape(*input_shape, -1)
             attn_output = self.o_proj(attn_output)
-            return attn_output, attn_weights
+            return attn_output, None
 
 
 class LlamaDecoderLayer(GradientCheckpointingLayer):
@@ -350,28 +386,28 @@ class LlamaDecoderLayer(GradientCheckpointingLayer):
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attention_runner: AttentionRunner,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[Cache] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
             cache_position: Optional[torch.LongTensor] = None,
             position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-            **kwargs: Unpack[TransformersKwargs],
-    ) -> torch.Tensor:
+            **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+
         # Self Attention
-        hidden_states, _ = self.self_attn(
+        hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
-            attention_runner=attention_runner,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
@@ -384,26 +420,42 @@ class LlamaDecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        return hidden_states
+
+        outputs = (hidden_states,)
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        return outputs
 
 
 @auto_docstring
 class LlamaPreTrainedModel(PreTrainedModel):
-    config: LlamaConfig
+    config_class = LlamaConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["LlamaDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
-    _supports_flash_attn = True
+    _supports_flash_attn_3 = True
+    _supports_flash_attn_2 = True
     _supports_sdpa = True
     _supports_flex_attn = True
-
-    _can_compile_fullgraph = True
+    _supports_cache_class = True
+    _supports_quantized_cache = True
+    _supports_static_cache = True
     _supports_attention_backend = True
-    _can_record_outputs = {
-        "hidden_states": LlamaDecoderLayer,
-        "attentions": LlamaAttention,
-    }
+
+    def _init_weights(self, module):
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, LlamaRMSNorm):
+            module.weight.data.fill_(1.0)
 
 
 @auto_docstring
@@ -421,23 +473,16 @@ class LlamaModel(LlamaPreTrainedModel):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
-        # costumed sparse attention runner
-        self.attn_runner = AttentionRunner(
-            num_layers=config.num_hidden_layers,
-            head_dim=config.head_dim,
-            num_kv_heads=config.num_key_value_heads,
-            num_qo_heads=config.num_attention_heads,
-            page_size=32,
-            max_length=32768,  # config.max_position_embeddings: 131072
-            topk=16,
-            dtype=config.dtype,
-            device="cuda:7"
-        )
-
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs()
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.embed_tokens = value
+
+    @can_return_tuple
     @auto_docstring
     def forward(
             self,
@@ -446,22 +491,40 @@ class LlamaModel(LlamaPreTrainedModel):
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[Cache] = None,
             inputs_embeds: Optional[torch.FloatTensor] = None,
-            cache_position: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
-            **kwargs: Unpack[TransformersKwargs],
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            cache_position: Optional[torch.LongTensor] = None,
+            **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
+        if self.gradient_checkpointing and self.training and use_cache:
+            logger.warning_once(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
+            )
+            use_cache = False
+
+        # TODO (joao): remove this exception in v4.56 -- it exists for users that try to pass a legacy cache
+        if not isinstance(past_key_values, (type(None), Cache)):
+            raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
+
         if inputs_embeds is None:
-            inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
+            past_key_values = DynamicCache()
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position: torch.Tensor = torch.arange(
+            cache_position = torch.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
 
@@ -478,25 +541,50 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
         hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            hidden_states = decoder_layer(
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            layer_outputs = decoder_layer(
                 hidden_states,
-                attention_runner=self.attn_runner,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
-                **kwargs,
+                **flash_attn_kwargs,
             )
 
+            hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
         hidden_states = self.norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
+            past_key_values=past_key_values if use_cache else None,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
         )
+
+
+class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
 @auto_docstring
@@ -514,6 +602,24 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
     @can_return_tuple
     @auto_docstring
     def forward(
@@ -525,11 +631,18 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             inputs_embeds: Optional[torch.FloatTensor] = None,
             labels: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
             cache_position: Optional[torch.LongTensor] = None,
             logits_to_keep: Union[int, torch.Tensor] = 0,
-            **kwargs: Unpack[TransformersKwargs],
+            **kwargs: Unpack[KwargsForCausalLM],
     ) -> CausalLMOutputWithPast:
         r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+            config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
         Example:
 
         ```python
@@ -546,6 +659,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -553,6 +672,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
             cache_position=cache_position,
             **kwargs,
         )
@@ -575,14 +696,239 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         )
 
 
-class LlamaForSequenceClassification(GenericForSequenceClassification, LlamaPreTrainedModel): ...
+@auto_docstring(
+    custom_intro="""
+    The LLaMa Model transformer with a sequence classification head on top (linear layer).
+
+    [`LlamaForSequenceClassification`] uses the last token in order to do the classification, as other causal models
+    (e.g. GPT-2) do.
+
+    Since it does classification on the last token, it requires to know the position of the last token. If a
+    `pad_token_id` is defined in the configuration, it finds the last token that is not a padding token in each row. If
+    no `pad_token_id` is defined, it simply takes the last value in each row of the batch. Since it cannot guess the
+    padding tokens when `inputs_embeds` are passed instead of `input_ids`, it does the same (take the last value in
+    each row of the batch).
+    """
+)
+class LlamaForSequenceClassification(LlamaPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.model = LlamaModel(config)
+        self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Cache] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+    ) -> SequenceClassifierOutputWithPast:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+
+        transformer_outputs: BaseModelOutputWithPast = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        hidden_states = transformer_outputs.last_hidden_state
+        logits = self.score(hidden_states)
+
+        if input_ids is not None:
+            batch_size = input_ids.shape[0]
+        else:
+            batch_size = inputs_embeds.shape[0]
+
+        if self.config.pad_token_id is None and batch_size != 1:
+            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+        if self.config.pad_token_id is None:
+            last_non_pad_token = -1
+        elif input_ids is not None:
+            # To handle both left- and right- padding, we take the rightmost token that is not equal to pad_token_id
+            non_pad_mask = (input_ids != self.config.pad_token_id).to(logits.device, torch.int32)
+            token_indices = torch.arange(input_ids.shape[-1], device=logits.device, dtype=torch.int32)
+            last_non_pad_token = (token_indices * non_pad_mask).argmax(-1)
+        else:
+            last_non_pad_token = -1
+            logger.warning_once(
+                f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
+                "unexpected if using padding tokens in conjunction with `inputs_embeds.`"
+            )
+
+        pooled_logits = logits[torch.arange(batch_size, device=logits.device), last_non_pad_token]
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, pooled_logits=pooled_logits, config=self.config)
+
+        return SequenceClassifierOutputWithPast(
+            loss=loss,
+            logits=pooled_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+        )
 
 
-class LlamaForQuestionAnswering(GenericForQuestionAnswering, LlamaPreTrainedModel):
-    base_model_prefix = "transformer"  # For BC, where `transformer` was used instead of `model`
+@auto_docstring
+class LlamaForQuestionAnswering(LlamaPreTrainedModel):
+    base_model_prefix = "transformer"
+
+    # Copied from transformers.models.bloom.modeling_bloom.BloomForQuestionAnswering.__init__ with Bloom->Llama
+    def __init__(self, config):
+        super().__init__(config)
+        self.transformer = LlamaModel(config)
+        self.qa_outputs = nn.Linear(config.hidden_size, 2)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.transformer.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.transformer.embed_tokens = value
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Cache] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            start_positions: Optional[torch.LongTensor] = None,
+            end_positions: Optional[torch.LongTensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            **kwargs,
+    ) -> QuestionAnsweringModelOutput:
+        outputs: BaseModelOutputWithPast = self.transformer(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+        sequence_output = outputs.last_hidden_state
+
+        logits = self.qa_outputs(sequence_output)
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1).contiguous()
+        end_logits = end_logits.squeeze(-1).contiguous()
+
+        loss = None
+        if start_positions is not None and end_positions is not None:
+            loss = self.loss_function(start_logits, end_logits, start_positions, end_positions, **kwargs)
+
+        return QuestionAnsweringModelOutput(
+            loss=loss,
+            start_logits=start_logits,
+            end_logits=end_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
-class LlamaForTokenClassification(GenericForTokenClassification, LlamaPreTrainedModel): ...
+@auto_docstring
+class LlamaForTokenClassification(LlamaPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.model = LlamaModel(config)
+        if getattr(config, "classifier_dropout", None) is not None:
+            classifier_dropout = config.classifier_dropout
+        elif getattr(config, "hidden_dropout", None) is not None:
+            classifier_dropout = config.hidden_dropout
+        else:
+            classifier_dropout = 0.1
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.score = nn.Linear(config.hidden_size, config.num_labels)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Cache] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+    ) -> TokenClassifierOutput:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        sequence_output = outputs.last_hidden_state
+        sequence_output = self.dropout(sequence_output)
+        logits = self.score(sequence_output)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits, labels, self.config)
+
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 __all__ = [

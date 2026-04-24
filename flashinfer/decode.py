@@ -359,7 +359,6 @@ def estimate(
         pooling: torch.Tensor,
         seq_len: int,
 ) -> None:
-    # estimate(TensorView q, TensorView pooling, uint32_t seq_len, TensorView out)
     get_decode_estimate_module().estimate(
         query,
         pooling,
