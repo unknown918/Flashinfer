@@ -188,3 +188,6 @@ CMakeLists.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 Llama-3.1-8B-Instruct/
+paper/benchmarks/longbench/Llama-3.1-8B-Instruct
+paper/benchmarks/longbench/data
+paper/benchmarks/longbench/pred

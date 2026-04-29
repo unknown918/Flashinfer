@@ -151,7 +151,10 @@ def get_topk_module():
         )
 
         module.radix_topk_mask_logits(
-            logits, mask_logits, indptr, indices, row_states_buffer, topk, num_valid_pages, last_page_len, group_size, page_size
+            logits, mask_logits,
+            indptr, indices,
+            row_states_buffer,
+            topk, num_valid_pages, last_page_len, group_size, page_size
         )
 
     @register_fake_op("flashinfer::radix_topk_mask_logits")

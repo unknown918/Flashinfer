@@ -355,14 +355,14 @@ def get_decode_estimate_module():
 
 def estimate(
         query: torch.Tensor,
-        out: torch.Tensor,
         pooling: torch.Tensor,
-        seq_len: int,
+        num_valid_pages: int,
+        out: torch.Tensor,
 ) -> None:
     get_decode_estimate_module().estimate(
         query,
         pooling,
-        seq_len,
+        num_valid_pages,
         out
     )
 

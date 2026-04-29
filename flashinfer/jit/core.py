@@ -298,8 +298,8 @@ class JitSpec:
         return tvm_ffi.load_module(str(so_path))
 
     def build_and_load(self):
-        # if self.is_aot:
-        #     return self.load(self.aot_path)
+        if self.is_aot:
+            return self.load(self.aot_path)
 
         # Guard both build and load with the same lock to avoid race condition
         # where another process is building the library and removes the .so file.

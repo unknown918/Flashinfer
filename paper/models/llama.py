@@ -37,8 +37,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
 from transformers.models.llama.configuration_llama import LlamaConfig
@@ -66,74 +65,6 @@ class LlamaRMSNorm(nn.Module):
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-class LlamaRotaryEmbedding(nn.Module):
-    def __init__(self, config: LlamaConfig, device=None):
-        super().__init__()
-        # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
-        self.max_seq_len_cached = config.max_position_embeddings
-        self.original_max_seq_len = config.max_position_embeddings
-
-        self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    @torch.no_grad()
-    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
-    def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
 
 
 class LlamaMLP(nn.Module):
@@ -181,26 +112,24 @@ class LlamaAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            position_embeddings: tuple[torch.Tensor, torch.Tensor],
+            attn_runner: AttentionRunner,
             attention_mask: Optional[torch.Tensor],
             past_key_value: Optional[Cache] = None,
             cache_position: Optional[torch.LongTensor] = None,
-            attn_runner: AttentionRunner = None,
             **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        q = self.q_proj(hidden_states).view(hidden_shape)[0]
+        k = self.k_proj(hidden_states).view(hidden_shape)[0]
+        v = self.v_proj(hidden_states).view(hidden_shape)[0]
 
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        q = query_states.transpose(1, 2)[0].contiguous()
-        k = key_states.transpose(1, 2)[0].contiguous()
-        v = value_states.transpose(1, 2)[0].contiguous()
+        q, k = attn_runner.apply_rope(
+            layer_id=self.layer_idx,
+            q=q,
+            k=k,
+        )
 
         if q.shape[0] > 1:  # prefill
             attn_output = attn_runner.prefill(self.layer_idx, q, k, v).unsqueeze(0)
@@ -228,14 +157,13 @@ class LlamaDecoderLayer(GradientCheckpointingLayer):
     def forward(
             self,
             hidden_states: torch.Tensor,
+            attn_runner: AttentionRunner,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_value: Optional[Cache] = None,
             output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
             cache_position: Optional[torch.LongTensor] = None,
-            position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-            attn_runner: AttentionRunner = None,
             **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
@@ -244,14 +172,13 @@ class LlamaDecoderLayer(GradientCheckpointingLayer):
         # Self Attention
         hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
+            attn_runner=attn_runner,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            attn_runner=attn_runner,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -311,24 +238,10 @@ class LlamaModel(LlamaPreTrainedModel):
             [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
         self.post_init()
-
-        # costumed sparse attention runner
-        self.attn_runner = AttentionRunner(
-            num_layers=config.num_hidden_layers,
-            head_dim=config.head_dim,
-            num_kv_heads=config.num_key_value_heads,
-            num_qo_heads=config.num_attention_heads,
-            page_size=32,
-            max_length=32768,  # config.max_position_embeddings: 131072
-            topk=16,
-            dtype=torch.bfloat16,
-            device="cuda:7"
-        )
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -341,6 +254,7 @@ class LlamaModel(LlamaPreTrainedModel):
     def forward(
             self,
             input_ids: Optional[torch.LongTensor] = None,
+            attn_runner: AttentionRunner = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[Cache] = None,
@@ -355,8 +269,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        use_cache = False
-        # use_cache = use_cache if use_cache is not None else self.config.use_cache
+        use_cache = False  # cache is manually managed in AttentionRunner
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -397,9 +310,6 @@ class LlamaModel(LlamaPreTrainedModel):
 
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -410,14 +320,13 @@ class LlamaModel(LlamaPreTrainedModel):
 
             layer_outputs = decoder_layer(
                 hidden_states,
+                attn_runner=attn_runner,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings,
-                attn_runner=self.attn_runner,
                 **flash_attn_kwargs,
             )
 
@@ -457,6 +366,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.attn_runner = None
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -475,6 +385,34 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
     def get_decoder(self):
         return self.model
+
+    def ss_init(
+            self,
+            device: str,
+            dtype: torch.dtype,
+            page_size: int = 32,
+            budget: int = 1024,
+            max_length: int = 32768,
+    ):
+        topk = (budget + page_size - 1) // page_size
+        # costumed sparse attention runner
+        self.attn_runner = AttentionRunner(
+            num_layers=self.config.num_hidden_layers,
+            head_dim=self.config.head_dim,
+            num_kv_heads=self.config.num_key_value_heads,
+            num_qo_heads=self.config.num_attention_heads,
+            page_size=page_size,
+            max_length=max_length,  # config.max_position_embeddings: 131072
+            topk=topk,
+            dtype=dtype,
+            device=device
+        )
+
+    def ss_flush(self):
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        self.attn_runner.cache_manager.flush_cache()
+        torch.cuda.synchronize()
 
     @can_return_tuple
     @auto_docstring
@@ -523,6 +461,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
+            attn_runner=self.attn_runner,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,

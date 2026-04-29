@@ -1230,6 +1230,8 @@ class VariableBlockSparseAttentionWrapper:
 class SparseSinkAttentionWrapper:
     def __init__(
             self,
+            num_kv_heads: int,
+            device: torch.device,
             float_workspace_buffer: torch.Tensor,
             backend: str = "auto",
     ) -> None:
@@ -1250,6 +1252,7 @@ class SparseSinkAttentionWrapper:
             pin_memory=True,
             device="cpu",
         )
+        self._num_kv_heads = num_kv_heads
         self._cached_module = None
         self._use_cuda_graph = False
         self._kv_layout = "NHD"
@@ -1258,6 +1261,12 @@ class SparseSinkAttentionWrapper:
         self._paged_kv_indices_buf: Optional[torch.Tensor] = None
         self._paged_kv_last_page_len: Optional[torch.Tensor] = None
         self._backend = backend
+        self._paged_kv_last_page_len = torch.full(
+            (num_kv_heads,),
+            1,
+            dtype=torch.int32,
+            device=device,
+        )
 
     def reset_workspace_buffer(
             self,
@@ -1318,7 +1327,6 @@ class SparseSinkAttentionWrapper:
             kv_data_type = q_data_type
         kv_data_type = canonicalize_torch_dtype(kv_data_type)
         self._o_dtype = q_data_type
-        device = kv_indptr.device
 
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
@@ -1327,12 +1335,6 @@ class SparseSinkAttentionWrapper:
 
         self._paged_kv_indptr_buf = kv_indptr
         self._paged_kv_indices_buf = kv_indices
-        self._paged_kv_last_page_len = torch.full(
-            (num_kv_heads,),
-            1,
-            dtype=torch.int32,
-            device=device,
-        )
         self._mask_mode = MaskMode.CAUSAL.value if causal else MaskMode.NON_CAUSAL.value
 
         # Sanity check
@@ -1383,7 +1385,6 @@ class SparseSinkAttentionWrapper:
         self._sm_scale = sm_scale
         self._rope_scale = rope_scale
         self._rope_theta = rope_theta
-        self._num_kv_heads = num_kv_heads
         self._gqa_group_size = num_qo_heads // num_kv_heads
 
     def run(
@@ -1433,9 +1434,6 @@ class SparseSinkAttentionWrapper:
             "num_pages page_size num_kv_heads head_dim -> (num_pages page_size num_kv_heads) 1 1 head_dim",
         ).contiguous()
 
-        sparse_indices = self._paged_kv_indices_buf
-        sparse_indptr = self._paged_kv_indptr_buf
-
         self._cached_module.run(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1443,8 +1441,8 @@ class SparseSinkAttentionWrapper:
             q,
             k,
             v,
-            sparse_indptr,
-            sparse_indices,
+            self._paged_kv_indptr_buf,
+            self._paged_kv_indices_buf,
             self._paged_kv_last_page_len,
             out,
             lse,

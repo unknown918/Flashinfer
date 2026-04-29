@@ -94,3 +94,13 @@ class PagedKVCache:
             self.pooling[layer_id],
             kv_layout="NHD"
         )
+
+    def flush_cache(self):
+        self.seq_len = 0
+        self.current_pages = 0
+        self.kv_page_indptr = torch.tensor([0, 0], dtype=torch.int32, device=self.device)
+        self.kv_page_indices = torch.arange(0, dtype=torch.int32, device=self.device)
+
+        self.pooling.zero_()
+        self.paged_k_cache.zero_()
+        self.paged_v_cache.zero_()

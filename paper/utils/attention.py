@@ -1,6 +1,7 @@
 import torch
 import flashinfer
 from paper.utils.cache import PagedKVCache
+from typing import Tuple
 
 
 class AttentionRunner:
@@ -44,11 +45,19 @@ class AttentionRunner:
 
         num_pages = int((max_length + page_size - 1) / page_size)
 
+        # rope indexers
+        self.rope_indptr = torch.tensor([0, 1], dtype=torch.int32, device=device)
+        self.rope_offset = torch.tensor([0], dtype=torch.int32, device=device)
+
         # decode wrapper and buffers
         self.logits = torch.zeros(num_qo_heads, num_pages, dtype=dtype, device=device).contiguous()
         self.output = torch.zeros(num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
         workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device).contiguous()
-        self.decode_wrapper = flashinfer.SparseSinkAttentionWrapper(workspace_buffer)
+        self.decode_wrapper = flashinfer.SparseSinkAttentionWrapper(
+            num_kv_heads=num_kv_heads,
+            device=device,
+            float_workspace_buffer=workspace_buffer
+        )
 
         # paged kv cache manager
         self.cache_manager = PagedKVCache(
@@ -63,9 +72,39 @@ class AttentionRunner:
             dtype=dtype
         )
 
-    def prefill(self, layer_id: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def apply_rope(
+            self,
+            layer_id: int,
+            q: torch.Tensor,
+            k: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert (q.dim() == 3 and k.dim() == 3)  # (seq_len, num_heads, head_dim)
         if layer_id == 0:
             self.cache_manager.seq_len += q.shape[0]
+
+        if q.shape[0] > 1:
+            self.rope_indptr[1] = self.cache_manager.seq_len
+            self.rope_offset[0] = 0
+        else:
+            self.rope_indptr[1] = 1
+            self.rope_offset[0] = self.cache_manager.seq_len - 1
+
+        flashinfer.rope.apply_llama31_rope_inplace(
+            q=q,  # batch size is 1
+            k=k,
+            indptr=self.rope_indptr,
+            offsets=self.rope_offset,
+            interleave=False,
+            rope_scale=8.0,
+            rope_theta=500000.0,
+            low_freq_factor=1.0,
+            high_freq_factor=4.0,
+            old_context_len=8192,
+        )
+        return q, k
+
+    def prefill(self, layer_id: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        assert (q.dim() == 3 and k.dim() == 3 and v.dim() == 3)  # (seq_len, num_heads, head_dim)
 
         self.cache_manager.append_page_prefill(layer_id, k, v)
 
@@ -84,31 +123,32 @@ class AttentionRunner:
             k: torch.Tensor,
             v: torch.Tensor,
     ) -> torch.Tensor:
+        assert (q.dim() == 2 and k.dim() == 2 and v.dim() == 2)  # (num_heads, head_dim)
+
         # TODO: could use a cuda graph to replay this process
-        if layer_id == 0:  # no sparse
-            self.cache_manager.seq_len += 1
-        if layer_id < 2:
-            self.cache_manager.append_page_decode(layer_id, k, v)
-            self.output = flashinfer.decode.single_decode_with_kv_cache(
+        self.cache_manager.append_page_decode(layer_id, k, v)
+
+        if layer_id < 2:  # no sparse for first two layers
+            output = flashinfer.decode.single_decode_with_kv_cache(
                 q,
                 self.cache_manager.paged_k_cache[layer_id].reshape(
                     -1, self.cache_manager.num_kv_heads, self.cache_manager.head_dim
-                ),
+                )[:self.cache_manager.seq_len],
                 self.cache_manager.paged_v_cache[layer_id].reshape(
                     -1, self.cache_manager.num_kv_heads, self.cache_manager.head_dim
-                ),
+                )[:self.cache_manager.seq_len],
             )
-            return self.output
+            return output
+
+        num_valid_pages = (self.cache_manager.seq_len - self.sink + self.page_size - 1) // self.page_size
+        last_page_len = self.cache_manager.seq_len - self.sink - (num_valid_pages - 1) * self.page_size
 
         flashinfer.decode.estimate(
             query=q,
+            pooling=self.cache_manager.pooling[layer_id] / self.cache_manager.page_size,
+            num_valid_pages=num_valid_pages,  # last page may have value, or not, but does not affect next kernel
             out=self.logits,
-            pooling=self.cache_manager.pooling[layer_id] / 32,
-            seq_len=self.cache_manager.current_pages,
         )
-
-        num_valid_pages = (self.cache_manager.seq_len - 4 + self.page_size - 1) // self.page_size
-        last_page_len = (self.cache_manager.seq_len - 4) - (num_valid_pages - 1) * self.page_size
 
         # expand top-k token's indices
         self.indptr, self.indices = flashinfer.topk_bool_mask_logits(

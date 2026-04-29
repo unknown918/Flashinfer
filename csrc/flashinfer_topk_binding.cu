@@ -39,10 +39,8 @@ bool can_implement_filtered_topk();
 // Radix-based Top-K selection
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk, radix_topk);
 
-// Fused Top-K + Page Table Transform for sparse attention
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk_page_table_transform, radix_topk_page_table_transform);
 
-// Fused Top-K + Ragged Index Transform for sparse attention
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(radix_topk_ragged_transform, radix_topk_ragged_transform);
 
 // Fused Top-K + Logits Mask for sparse attention

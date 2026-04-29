@@ -83,11 +83,8 @@ __device__ __forceinline__ void compute_qk(const DType* smem, const vec_t<float,
 template <typename DType, uint32_t num_stages_smem, uint32_t tile_size_per_bdx, uint32_t vec_size,
           uint32_t bdx, uint32_t bdy, uint32_t bdz>
 __global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                 uint32_t seq_len, uint32_t num_pages, uint32_t kv_chunk_size,
-                                 DType* out) {
-  auto block = cg::this_thread_block();
-  auto grid = cg::this_grid();
-
+                                 uint32_t num_valid_pages, uint32_t num_total_pages,
+                                 uint32_t kv_chunk_size, DType* out) {
   constexpr uint32_t head_dim = bdx * vec_size;
 
   uint32_t kv_chunk_idx = blockIdx.x;
@@ -95,8 +92,7 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint
 
   uint32_t qo_head_idx = kv_head_idx * bdy + threadIdx.y;
   uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
-  uint32_t chunk_end = min(chunk_start + kv_chunk_size, seq_len);
-
+  uint32_t chunk_end = min(chunk_start + kv_chunk_size, num_valid_pages);
   uint32_t kv_stride_h = head_dim;
   uint32_t kv_stride_n = num_kv_heads * head_dim;
 
@@ -107,7 +103,7 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint
   uint32_t tx = threadIdx.x, ty = threadIdx.y, tz = threadIdx.z;
   vec_t<float, vec_size> q_vec;
   q_vec.cast_load(q + qo_head_idx * head_dim + tx * vec_size);
-  block.sync();
+  __syncthreads();
 
   // preload k tiles
   uint32_t producer_kv_idx_base = chunk_start;
@@ -133,12 +129,12 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint
   for (uint32_t iter = 0; iter < ceil_div(kv_chunk_size, tile_size_per_bdx * bdy * bdz); ++iter) {
     // compute qk
     cp_async::wait_group<num_stages_smem - 1>();
-    block.sync();
+    __syncthreads();
     compute_qk<vec_size, bdx, bdy * tile_size_per_bdx, DType>(
         k_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, q_vec,
         consumer_kv_idx_base, iter * bdy * tile_size_per_bdx * bdz, kv_chunk_size,
-        out + num_pages * qo_head_idx, tx, ty, tz);
-    block.sync();
+        out + num_total_pages * qo_head_idx, tx, ty, tz);
+    __syncthreads();
     // load k
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
       cp_async::pred_load<vec_bits, PrefetchMode::kPrefetch, SharedMemFillMode::kNoFill>(
@@ -155,7 +151,7 @@ __global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint
     consumer_kv_idx_base += tile_size_per_bdx * bdy * bdz;
   }
   cp_async::wait_group<0>();
-  block.sync();
+  __syncthreads();
 }
 
 /*!
@@ -189,8 +185,8 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
  */
 template <uint32_t HEAD_DIM, typename DType>
 cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __restrict__ out,
-                     uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t seq_len,
-                     uint32_t num_pages, cudaStream_t stream) {
+                     uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t num_valid_pages,
+                     uint32_t num_total_pages, cudaStream_t stream) {
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DType), HEAD_DIM / 32UL);
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   auto compute_capacity = GetCudaComputeCapability();
@@ -219,15 +215,20 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
 
       uint32_t max_grid_size = uint32_t(num_blocks_per_sm) * uint32_t(num_sm);
       uint32_t num_chunks = max_grid_size / num_kv_heads;
-      uint32_t kv_chunk_size = ceil_div(seq_len, num_chunks);
+      uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
 
       // no need to use partition-kv
       dim3 nblks = dim3(num_chunks, num_kv_heads);
       dim3 nthrs = dim3(bdx, bdy, bdz);
 
-      void* args[] = {
-          (void*)&q,       (void*)&k,         (void*)&num_qo_heads,  (void*)&num_kv_heads,
-          (void*)&seq_len, (void*)&num_pages, (void*)&kv_chunk_size, (void*)&out};
+      void* args[] = {(void*)&q,
+                      (void*)&k,
+                      (void*)&num_qo_heads,
+                      (void*)&num_kv_heads,
+                      (void*)&num_valid_pages,
+                      (void*)&num_total_pages,
+                      (void*)&kv_chunk_size,
+                      (void*)&out};
       FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
       return cudaSuccess;
     });
