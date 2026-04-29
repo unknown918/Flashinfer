@@ -125,18 +125,24 @@ class LlamaAttention(nn.Module):
         k = self.k_proj(hidden_states).view(hidden_shape)[0]
         v = self.v_proj(hidden_states).view(hidden_shape)[0]
 
+        torch.cuda.nvtx.range_push("RoPE")
         q, k = attn_runner.apply_rope(
             layer_id=self.layer_idx,
             q=q,
             k=k,
         )
+        torch.cuda.nvtx.range_pop()
 
         if q.shape[0] > 1:  # prefill
+            torch.cuda.nvtx.range_push("Prefill")
             attn_output = attn_runner.prefill(self.layer_idx, q, k, v).unsqueeze(0)
+            torch.cuda.nvtx.range_pop()
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
         else:  # decode
+            torch.cuda.nvtx.range_push("Decode")
             attn_output = attn_runner.decode(self.layer_idx, q[0], k[0], v[0]).unsqueeze(0)
+            torch.cuda.nvtx.range_pop()
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
 
@@ -409,10 +415,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         )
 
     def ss_flush(self):
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
         self.attn_runner.cache_manager.flush_cache()
-        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     @can_return_tuple
     @auto_docstring

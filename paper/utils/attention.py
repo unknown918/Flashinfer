@@ -129,6 +129,7 @@ class AttentionRunner:
         self.cache_manager.append_page_decode(layer_id, k, v)
 
         if layer_id < 2:  # no sparse for first two layers
+            torch.cuda.nvtx.range_push("Full Attn")
             output = flashinfer.decode.single_decode_with_kv_cache(
                 q,
                 self.cache_manager.paged_k_cache[layer_id].reshape(
@@ -138,18 +139,24 @@ class AttentionRunner:
                     -1, self.cache_manager.num_kv_heads, self.cache_manager.head_dim
                 )[:self.cache_manager.seq_len],
             )
+            torch.cuda.nvtx.range_pop()
             return output
+
+        torch.cuda.nvtx.range_push("Sparse Attn")
 
         num_valid_pages = (self.cache_manager.seq_len - self.sink + self.page_size - 1) // self.page_size
         last_page_len = self.cache_manager.seq_len - self.sink - (num_valid_pages - 1) * self.page_size
 
+        torch.cuda.nvtx.range_push("Estimate")
         flashinfer.decode.estimate(
             query=q,
             pooling=self.cache_manager.pooling[layer_id] / self.cache_manager.page_size,
             num_valid_pages=num_valid_pages,  # last page may have value, or not, but does not affect next kernel
             out=self.logits,
         )
+        torch.cuda.nvtx.range_pop()
 
+        torch.cuda.nvtx.range_push("TopK")
         # expand top-k token's indices
         self.indptr, self.indices = flashinfer.topk_bool_mask_logits(
             topk=self.topk - 1,
@@ -163,7 +170,10 @@ class AttentionRunner:
             mask_logits=self.mask_logits
         )
         self.indptr = self.indptr.cumsum(dim=0, dtype=torch.int32)
+        torch.cuda.nvtx.range_pop()
 
+
+        torch.cuda.nvtx.range_push("Attn Plan")
         # split-K and other stuff
         self.decode_wrapper.plan(
             kv_indptr=self.indptr,
@@ -173,7 +183,9 @@ class AttentionRunner:
             head_dim=self.cache_manager.head_dim,
             causal=True
         )
+        torch.cuda.nvtx.range_pop()
 
+        torch.cuda.nvtx.range_push("Attn Run")
         self.decode_wrapper.run(
             q=q,
             k=self.cache_manager.paged_k_cache[layer_id],
@@ -181,6 +193,9 @@ class AttentionRunner:
             out=self.output,
             return_lse=False
         )
+        torch.cuda.nvtx.range_pop()
+
+        torch.cuda.nvtx.range_pop()
 
         self.indptr.zero_()
         self.indices.zero_()

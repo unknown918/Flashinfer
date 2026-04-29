@@ -6,7 +6,7 @@ from paper.models.llama import LlamaForCausalLM
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
 device = torch.device("cuda:0")
-model_id = "../Llama-3.1-8B-Instruct"
+model_id = "./Llama-3.1-8B-Instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
@@ -16,7 +16,7 @@ model = AutoModelForCausalLM.from_pretrained(
 ).to(device)
 
 model.eval()
-with open("./prompt.txt", 'r', encoding='utf-8') as f:
+with open("./paper/prompt.txt", 'r', encoding='utf-8') as f:
     prompt = f.read()
 
 messages = [
@@ -36,7 +36,7 @@ print("Sequence Length: ", input_ids.shape[1])
 
 model.ss_init(
     device="cuda:0",
-    budget=1024,
+    budget=512,
     page_size=32,
     max_length=32768,
     dtype=torch.float16,
