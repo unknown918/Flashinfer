@@ -22,28 +22,25 @@ class AttentionRunner:
 
         self.sink = sink
         self.topk = topk
+        self.budgets = topk * page_size
         self.page_size = page_size
         self.max_length = max_length
         self.group_size = num_qo_heads // num_kv_heads
 
         # sparse attention buffers (one for all layers)
-        self.indptr = torch.zeros(
-            1 + num_kv_heads,
-            dtype=torch.int32,
-            device=device
-        )
         self.indices = torch.zeros(
             num_kv_heads * (self.sink + self.topk * self.group_size * page_size),
             dtype=torch.int32,
             device=device
         )
-        self.mask_logits = torch.zeros(
-            num_kv_heads, max_length,
-            dtype=torch.int32,
-            device=device
-        )
+        self.indptr = torch.zeros(1 + num_kv_heads, dtype=torch.int32, device=device)
+        self.row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
+        self.mask_logits = torch.zeros(num_kv_heads, max_length, dtype=torch.int32, device=device)
 
         num_pages = int((max_length + page_size - 1) / page_size)
+        self.layer_id = 0
+        self.num_valid_pages = 0
+        self.last_page_len = 0
 
         # rope indexers
         self.rope_indptr = torch.tensor([0, 1], dtype=torch.int32, device=device)
@@ -71,6 +68,33 @@ class AttentionRunner:
             device=device,
             dtype=dtype
         )
+
+        # self.static_indptr = torch.cat(
+        #     [
+        #         torch.tensor([0], dtype=torch.int32, device=device),
+        #         torch.full((num_kv_heads,), self.budgets, dtype=torch.int32, device=device)
+        #     ]
+        # )
+        # self.static_indptr = self.static_indptr.cumsum(dim=0).to(torch.int32)
+        # self.static_indices = torch.zeros(
+        #     num_kv_heads * self.budgets,
+        #     dtype=torch.int32,
+        #     device=device
+        # )
+
+        # static buffer for decode cuda graph
+        self.topk -= 1
+        self.q = torch.zeros(num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
+        self.graphs = [
+            # (torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph())
+            torch.cuda.CUDAGraph()
+            for _ in range(num_layers - 2)
+        ]
+        self.graph_captured = [
+            False
+            for _ in range(num_layers - 2)
+        ]
+        self.alt_stream = torch.cuda.Stream()
 
     def apply_rope(
             self,
@@ -125,11 +149,9 @@ class AttentionRunner:
     ) -> torch.Tensor:
         assert (q.dim() == 2 and k.dim() == 2 and v.dim() == 2)  # (num_heads, head_dim)
 
-        # TODO: could use a cuda graph to replay this process
         self.cache_manager.append_page_decode(layer_id, k, v)
 
         if layer_id < 2:  # no sparse for first two layers
-            torch.cuda.nvtx.range_push("Full Attn")
             output = flashinfer.decode.single_decode_with_kv_cache(
                 q,
                 self.cache_manager.paged_k_cache[layer_id].reshape(
@@ -139,41 +161,41 @@ class AttentionRunner:
                     -1, self.cache_manager.num_kv_heads, self.cache_manager.head_dim
                 )[:self.cache_manager.seq_len],
             )
-            torch.cuda.nvtx.range_pop()
             return output
 
-        torch.cuda.nvtx.range_push("Sparse Attn")
+        g = self.graphs[layer_id - 2]
 
-        num_valid_pages = (self.cache_manager.seq_len - self.sink + self.page_size - 1) // self.page_size
-        last_page_len = self.cache_manager.seq_len - self.sink - (num_valid_pages - 1) * self.page_size
+        self.q.copy_(q)
+        self.layer_id = layer_id
 
-        torch.cuda.nvtx.range_push("Estimate")
+        self.num_valid_pages = (self.cache_manager.seq_len - self.sink + self.page_size - 1) // self.page_size
+        self.last_page_len = self.cache_manager.seq_len - self.sink - (self.num_valid_pages - 1) * self.page_size
+
         flashinfer.decode.estimate(
-            query=q,
-            pooling=self.cache_manager.pooling[layer_id] / self.cache_manager.page_size,
-            num_valid_pages=num_valid_pages,  # last page may have value, or not, but does not affect next kernel
+            query=self.q,
+            pooling=self.cache_manager.pooling[self.layer_id] / self.cache_manager.page_size,
+            num_valid_pages=self.num_valid_pages,
             out=self.logits,
         )
-        torch.cuda.nvtx.range_pop()
 
-        torch.cuda.nvtx.range_push("TopK")
+        self.num_valid_pages -= 1  # always select last page
+
         # expand top-k token's indices
-        self.indptr, self.indices = flashinfer.topk_bool_mask_logits(
-            topk=self.topk - 1,
+        flashinfer.topk_bool_mask_logits(
+            top_k=self.topk,
             page_size=self.page_size,
-            last_page_len=last_page_len,
-            num_valid_pages=num_valid_pages - 1,  # always select last page
+            last_page_len=self.last_page_len,
+            num_valid_pages=self.num_valid_pages,
             logits=self.logits,
             indptr=self.indptr,
             indices=self.indices,
             group_size=self.group_size,
-            mask_logits=self.mask_logits
+            mask_logits=self.mask_logits,
+            row_states_buffer=self.row_states_buffer,
         )
-        self.indptr = self.indptr.cumsum(dim=0, dtype=torch.int32)
-        torch.cuda.nvtx.range_pop()
 
+        torch.cumsum(self.indptr, dim=0, dtype=torch.int32, out=self.indptr)
 
-        torch.cuda.nvtx.range_push("Attn Plan")
         # split-K and other stuff
         self.decode_wrapper.plan(
             kv_indptr=self.indptr,
@@ -183,19 +205,19 @@ class AttentionRunner:
             head_dim=self.cache_manager.head_dim,
             causal=True
         )
-        torch.cuda.nvtx.range_pop()
 
-        torch.cuda.nvtx.range_push("Attn Run")
-        self.decode_wrapper.run(
-            q=q,
-            k=self.cache_manager.paged_k_cache[layer_id],
-            v=self.cache_manager.paged_v_cache[layer_id],
-            out=self.output,
-            return_lse=False
-        )
-        torch.cuda.nvtx.range_pop()
-
-        torch.cuda.nvtx.range_pop()
+        if not self.graph_captured[layer_id - 2]:
+            self.graph_captured[layer_id - 2] = True
+            with torch.cuda.graph(g):
+                self.decode_wrapper.run(
+                    q=self.q,
+                    k=self.cache_manager.paged_k_cache[self.layer_id],
+                    v=self.cache_manager.paged_v_cache[self.layer_id],
+                    out=self.output,
+                    return_lse=False
+                )
+        else:
+            g.replay()
 
         self.indptr.zero_()
         self.indices.zero_()

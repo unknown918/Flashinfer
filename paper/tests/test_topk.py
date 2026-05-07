@@ -28,7 +28,7 @@ def test_topk_bool_mask_logits(seq_len, page_size):
 
     logits = torch.randn(
         num_qo_head, num_total_pages,
-        dtype=torch.float32,
+        dtype=torch.float16,
         device=device
     )
 
@@ -99,7 +99,7 @@ def test_topk_bool_mask_logits(seq_len, page_size):
     )
 
     _indptr, _indices = flashinfer.topk_bool_mask_logits(
-        topk=k - 1,
+        top_k=k - 1,
         page_size=page_size,
         last_page_len=last_page_len,
         num_valid_pages=num_valid_pages - 1,

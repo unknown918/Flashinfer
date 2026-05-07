@@ -1237,9 +1237,7 @@ class SparseSinkAttentionWrapper:
     ) -> None:
         self._float_workspace_buffer = float_workspace_buffer
         self.device = float_workspace_buffer.device
-        self._workspace_size = (
-                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
-        )
+        self._workspace_size = float_workspace_buffer.numel() * float_workspace_buffer.element_size()
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
         )
@@ -1289,9 +1287,7 @@ class SparseSinkAttentionWrapper:
         """
         self._float_workspace_buffer = float_workspace_buffer
         self._int_workspace_buffer = int_workspace_buffer
-        self._workspace_size = (
-                float_workspace_buffer.numel() * float_workspace_buffer.element_size()
-        )
+        self._workspace_size = float_workspace_buffer.numel() * float_workspace_buffer.element_size()
         self._pin_memory_int_workspace_buffer = torch.empty(
             self._int_workspace_buffer.shape,
             dtype=self._int_workspace_buffer.dtype,
@@ -1366,7 +1362,7 @@ class SparseSinkAttentionWrapper:
             num_qo_heads // num_kv_heads,  # num_qo_heads (group_size)
             1,  # num_kv_heads,
             1,  # page_size
-            False,  # enable_cuda_graph
+            True,  # enable_cuda_graph
             -1,  # window_left
             logits_soft_cap,
             head_dim,  # head_dim_qk

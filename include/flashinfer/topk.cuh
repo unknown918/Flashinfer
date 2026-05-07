@@ -1124,8 +1124,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   batch_size = batch_size / group_size;
   uint32_t row_idx = (global_cta_id * BLOCK_THREADS + tx) / row_size;
   uint32_t page_idx = (global_cta_id * BLOCK_THREADS + tx) % row_size;
-  // intra-warp offset
-  uint32_t lane_id = page_idx % 32;
+  uint32_t lane_id = tx % 32;
   uint32_t src_lane = 0U;
   // page count
   uint32_t row_start = 0U;
@@ -1152,7 +1151,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   grid.sync();
 
   if (row_idx < batch_size) {
-#pragma unroll
     for (uint32_t i = 0; i < row_idx; i++) {
       row_start += indptr[i + 1];
     }
@@ -1169,18 +1167,18 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
       // kv layout: (num_pages, page_size, num_kv_heads)
       for (uint32_t i = 0; i < ceil_div(page_size, 32); i++) {
         token_idx = (lane_id + i * 32) % page_size;
-        indices[start_pos + token_idx] =
-            (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
+        indices[start_pos + token_idx] = (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
       }
       ballot_mask &= ballot_mask - 1;
       count++;
     }
     row_end = (row_start + indptr[row_idx + 1]) * page_size + (row_idx + 1) * (4 + last_page_len);
-    row_start = row_start * page_size + row_idx * (4 + last_page_len);
-    if (page_idx < 4)
-      indices[row_start + page_idx] = page_idx * batch_size + row_idx;
     if (page_idx == 0)
       indptr[row_idx + 1] = indptr[row_idx + 1] * page_size + 4 + last_page_len;
+    if (page_idx < 4) {
+      row_start = row_start * page_size + row_idx * (4 + last_page_len);
+      indices[row_start + page_idx] = page_idx * batch_size + row_idx;
+    }
     if (page_idx < last_page_len)
       indices[row_end - last_page_len + page_idx] = (4 + num_valid_pages * page_size + page_idx) * batch_size + row_idx;
   }

@@ -12,7 +12,7 @@ def assert_close(a, b):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float16]) # fixme: torch.bfloat16 has precision bug
+@pytest.mark.parametrize("dtype", [torch.float16])  # fixme: torch.bfloat16 has precision bug
 @pytest.mark.parametrize("topk", [8, 15, 16])
 @pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 3351, 6666, 7777, 8888, 5537])
 def test_sparse_sink_attention(dtype, topk, seq_len):
@@ -33,68 +33,10 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     num_valid_pages = (seq_len - sink_size + page_size - 1) // page_size
     last_page_len = seq_len - sink_size - (num_valid_pages - 1) * page_size
 
-    logits = torch.randn(
+    logits = torch.zeros(
         num_qo_head, num_total_pages,
         dtype=torch.float32, device="cuda"
     )
-
-    num_blocks_col = num_valid_pages + 1
-
-    block_row_sz = torch.full(
-        (num_kv_head, 1), 1,
-        dtype=torch.int32, device="cuda"
-    )
-
-    block_col_sz = torch.zeros(
-        num_blocks_col, dtype=torch.int32, device="cuda"
-    )
-    block_col_sz[0] = sink_size
-    block_col_sz[-1] = last_page_len
-
-    for i in range(1, num_blocks_col):
-        block_col_sz[i] = min(page_size, seq_len - sink_size - (i - 1) * page_size)
-
-    block_col_sz = block_col_sz.unsqueeze(0).repeat(num_kv_head, 1)
-
-    block_mask_map = torch.zeros(
-        num_kv_head, 1, num_blocks_col,
-        dtype=torch.int32, device="cuda"
-    )
-
-    indices = torch.topk(
-        logits[:, :num_valid_pages - 1],
-        k=topk - 1
-    ).indices.cpu()
-
-    indices += 1 # include sink tokens
-
-    for i in range(num_kv_head):
-        for j in range(group_size):
-            block_mask_map[i, 0, indices[i * group_size + j]] = 1
-
-        block_mask_map[i, 0, 0] = 1
-        block_mask_map[i, 0, -1] = 1
-
-    q = torch.randn(num_qo_head, 1, head_dim, dtype=dtype, device="cuda")
-    k = torch.randn(num_kv_head, seq_len, head_dim, dtype=dtype, device="cuda")
-    v = torch.randn(num_kv_head, seq_len, head_dim, dtype=dtype, device="cuda")
-
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    ref_wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
-        workspace, backend="fa2"
-    )
-
-    ref_wrapper.plan(
-        block_mask_map=block_mask_map,
-        block_row_sz=block_row_sz,
-        block_col_sz=block_col_sz,
-        num_qo_heads=num_qo_head,
-        num_kv_heads=num_kv_head,
-        head_dim=head_dim,
-        q_data_type=dtype,
-    )
-
-    attn_ref = ref_wrapper.run(q, k, v)
 
     indptr = torch.zeros(
         1 + num_kv_head,
@@ -114,8 +56,12 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
         device="cuda"
     )
 
+    q = torch.randn(num_qo_head, head_dim, dtype=dtype, device="cuda")
+    k = torch.randn(seq_len, num_kv_head, head_dim, dtype=dtype, device="cuda")
+    v = torch.randn(seq_len, num_kv_head, head_dim, dtype=dtype, device="cuda")
+
     _indptr, _indices = flashinfer.topk_bool_mask_logits(
-        topk=topk - 1,
+        top_k=topk - 1,
         page_size=page_size,
         last_page_len=last_page_len,
         num_valid_pages=num_valid_pages - 1,
@@ -131,8 +77,11 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     decode_workspace = torch.empty(
         128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
     )
+
     decode_wrapper = flashinfer.SparseSinkAttentionWrapper(
-        decode_workspace
+        num_kv_heads=num_kv_head,
+        device=torch.device("cuda"),
+        float_workspace_buffer=decode_workspace,
     )
 
     decode_wrapper.plan(
