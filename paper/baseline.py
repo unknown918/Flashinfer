@@ -67,5 +67,5 @@ new_tokens = outputs[0][seq_len:]
 response = tokenizer.decode(new_tokens, skip_special_tokens=True)
 print(response)
 print(f"Seq Len: {seq_len}")
-print(f"TTFT: {ttft}")
-print(f"TPOT: {tpot}")
+print(f"TTFT: {ttft * 1e3:3f} ms")
+print(f"TPOT: {tpot * 1e3:3f} ms")

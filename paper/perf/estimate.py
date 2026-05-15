@@ -42,7 +42,7 @@ estimate_overhead = np.median(
         ),
         dry_run_time_ms=100,
         repeat_time_ms=1000,
-        # use_cuda_graph=True,
+        use_cuda_graph=True,
     )
 )
 

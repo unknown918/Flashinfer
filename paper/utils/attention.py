@@ -153,7 +153,8 @@ class AttentionRunner:
         )
 
     def decode(
-            self, layer_id: int,
+            self,
+            layer_id: int,
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
@@ -201,8 +202,6 @@ class AttentionRunner:
             row_states_buffer=self.row_states_buffer,
         )
 
-        # torch.cumsum(self.indptr, dim=0, dtype=torch.int32, out=self.indptr)
-
         g = self.graphs[self.layer_id - 2]
         if not self.graph_captured[self.layer_id - 2]:
             self.graph_captured[layer_id - 2] = True
@@ -217,10 +216,6 @@ class AttentionRunner:
                     out=self.output,
                     return_lse=False
                 )
-                # self.indptr.zero_()
-                # self.indices.zero_()
-                # self.logits.zero_()
-                # self.mask_logits.zero_()
         else:
             g.replay()
 
