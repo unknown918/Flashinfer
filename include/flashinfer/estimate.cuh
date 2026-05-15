@@ -13,8 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef FLASHINFER_DECODE_CUH_
-#define FLASHINFER_DECODE_CUH_
+#ifndef FLASHINFER_ESTIMATE_CUH_
+#define FLASHINFER_ESTIMATE_CUH_
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -176,10 +176,12 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
  * \tparam HEAD_DIM A integer indicates the head dimension
  * \tparam DType A template type indicates the data type
  * \param q The query matrix, shape: [num_qo_heads, head_dim]
- * \param k The key matrix in kv-cache, shape: [seq_len, num_kv_heads, head_dim]
+ * \param k The key matrix in kv-cache, shape: [num_total_pages, num_kv_heads, head_dim]
+ * \param out The estimation result, shape: [num_total_pages, num_kv_heads, head_dim]
  * \param num_qo_heads A integer indicates the number of heads of query and output
  * \param num_kv_heads A integer indicates the number of heads of key and value
- * \param seq_len A integer indicates the sequence length
+ * \param num_valid_pages A integer indicates the valid num pages
+ * \param num_total_pages A integer indicates the max page nums
  * \param stream The cuda stream to launch the kernel
  * \return status Indicates whether CUDA calls are successful
  */
@@ -236,4 +238,4 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
 }
 }  // namespace flashinfer
 
-#endif  // FLASHINFER_DECODE_CUH_
+#endif  // FLASHINFER_ESTIMATE_CUH_

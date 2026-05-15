@@ -3,15 +3,13 @@ import torch
 import flashinfer
 
 
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 3351, 6666, 7777, 8888, 5537])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 5528, 3351, 6666, 7777, 8888, 5537])
 @pytest.mark.parametrize("page_size", [16, 32])  # fixme: page_size=64 has bug
 def test_topk_bool_mask_logits(seq_len, page_size):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for this test")
-
     torch.manual_seed(42)
 
-    device = "cuda:0"
+    device = torch.device("cuda:0")
 
     num_kv_head = 8
     num_qo_head = 32
@@ -22,13 +20,14 @@ def test_topk_bool_mask_logits(seq_len, page_size):
     num_total_pages = max_length // page_size
     num_valid_pages = (seq_len - 4 + page_size - 1) // page_size
     last_page_len = (seq_len - 4) - (num_valid_pages - 1) * page_size
+    row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
 
     assert last_page_len > 0
     assert num_valid_pages > 0
 
     logits = torch.randn(
         num_qo_head, num_total_pages,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device=device
     )
 
@@ -52,7 +51,7 @@ def test_topk_bool_mask_logits(seq_len, page_size):
             device=device
         )
 
-        for i, group in enumerate(page_indices):
+        for idx, group in enumerate(page_indices):
             union = torch.unique(group.flatten())
 
             token_indices_per_group = (union.unsqueeze(-1) * page_size + offsets).reshape(-1) + 4
@@ -66,16 +65,16 @@ def test_topk_bool_mask_logits(seq_len, page_size):
                 dim=-1
             )
 
-            kv_layout_indices = token_indices_per_group * num_kv_head + i
+            kv_layout_indices = token_indices_per_group * num_kv_head + idx
 
-            if i == 0:
+            if idx == 0:
                 token_indices = kv_layout_indices
             else:
                 token_indices = torch.cat(
                     [token_indices, kv_layout_indices], dim=-1
                 )
 
-            token_indptr[i + 1] = token_indices_per_group.shape[0]
+            token_indptr[idx + 1] = token_indices_per_group.shape[0]
 
         return token_indptr, token_indices
 
@@ -107,21 +106,21 @@ def test_topk_bool_mask_logits(seq_len, page_size):
         indptr=indptr,
         indices=indices,
         group_size=group_size,
-        mask_logits=mask_logits
+        mask_logits=mask_logits,
+        row_states_buffer=row_states_buffer
     )
+
+    _indptr = _indptr.to(torch.int32)
 
     ref_indptr, ref_indices = ref_expand()
 
-    assert torch.equal(
-        ref_indptr.to(torch.int32),
-        _indptr.to(torch.int32)
-    )
+    assert torch.equal(ref_indptr, _indptr)
 
-    _indptr_cumsum = _indptr.cumsum(dim=-1)
+    _indptr = _indptr.cumsum(dim=-1)
 
     for i in range(num_kv_head):
-        start = _indptr_cumsum[i]
-        end = _indptr_cumsum[i + 1]
+        start = _indptr[i]
+        end = _indptr[i + 1]
 
         ref_slice = ref_indices[start:end].sort().values
         out_slice = _indices[start:end].to(torch.int32).sort().values

@@ -25,40 +25,97 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     head_dim = 128
     sink_size = 4
 
+    device = torch.device("cuda:0")
+
     group_size = num_qo_head // num_kv_head
     num_total_pages = max_length // page_size
+    row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
 
     assert num_qo_head % num_kv_head == 0, "invalid head grouping"
 
     num_valid_pages = (seq_len - sink_size + page_size - 1) // page_size
     last_page_len = seq_len - sink_size - (num_valid_pages - 1) * page_size
 
-    logits = torch.zeros(
+    logits = torch.randn(
         num_qo_head, num_total_pages,
-        dtype=torch.float32, device="cuda"
+        dtype=torch.float32, device=device
     )
+
+    num_blocks_col = num_valid_pages + 1
+
+    block_row_sz = torch.full(
+        (num_kv_head, 1), 1,
+        dtype=torch.int32, device=device
+    )
+
+    block_col_sz = torch.zeros(
+        num_blocks_col, dtype=torch.int32, device=device
+    )
+    block_col_sz[0] = sink_size
+    block_col_sz[-1] = last_page_len
+
+    for i in range(1, num_blocks_col):
+        block_col_sz[i] = min(page_size, seq_len - sink_size - (i - 1) * page_size)
+
+    block_col_sz = block_col_sz.unsqueeze(0).repeat(num_kv_head, 1)
+
+    block_mask_map = torch.zeros(
+        num_kv_head, 1, num_blocks_col,
+        dtype=torch.int32, device=device
+    )
+
+    indices = torch.topk(
+        logits[:, :num_valid_pages - 1],
+        k=topk - 1
+    ).indices.cpu()
+
+    indices += 1  # include sink tokens
+
+    for i in range(num_kv_head):
+        for j in range(group_size):
+            block_mask_map[i, 0, indices[i * group_size + j]] = 1
+
+        block_mask_map[i, 0, 0] = 1
+        block_mask_map[i, 0, -1] = 1
+
+    q = torch.randn(num_qo_head, 1, head_dim, dtype=dtype, device=device)
+    k = torch.randn(num_kv_head, seq_len, head_dim, dtype=dtype, device=device)
+    v = torch.randn(num_kv_head, seq_len, head_dim, dtype=dtype, device=device)
+
+    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+    ref_wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
+        workspace, backend="fa2"
+    )
+
+    ref_wrapper.plan(
+        block_mask_map=block_mask_map,
+        block_row_sz=block_row_sz,
+        block_col_sz=block_col_sz,
+        num_qo_heads=num_qo_head,
+        num_kv_heads=num_kv_head,
+        head_dim=head_dim,
+        q_data_type=dtype,
+    )
+
+    attn_ref = ref_wrapper.run(q, k, v)
 
     indptr = torch.zeros(
         1 + num_kv_head,
         dtype=torch.uint32,
-        device="cuda"
+        device=device
     )
 
     indices_buf = torch.zeros(
         num_kv_head * (sink_size + topk * group_size * page_size),
         dtype=torch.uint32,
-        device="cuda"
+        device=device
     )
 
     mask_logits = torch.zeros(
         num_kv_head, num_total_pages,
         dtype=torch.uint32,
-        device="cuda"
+        device=device
     )
-
-    q = torch.randn(num_qo_head, head_dim, dtype=dtype, device="cuda")
-    k = torch.randn(seq_len, num_kv_head, head_dim, dtype=dtype, device="cuda")
-    v = torch.randn(seq_len, num_kv_head, head_dim, dtype=dtype, device="cuda")
 
     _indptr, _indices = flashinfer.topk_bool_mask_logits(
         top_k=topk - 1,
@@ -69,18 +126,18 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
         indptr=indptr,
         indices=indices_buf,
         group_size=group_size,
-        mask_logits=mask_logits
+        mask_logits=mask_logits,
+        row_states_buffer=row_states_buffer
     )
 
     _indptr = _indptr.cumsum(dim=-1)
 
     decode_workspace = torch.empty(
-        128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+        128 * 1024 * 1024, dtype=torch.uint8, device=device
     )
-
     decode_wrapper = flashinfer.SparseSinkAttentionWrapper(
         num_kv_heads=num_kv_head,
-        device=torch.device("cuda"),
+        device=device,
         float_workspace_buffer=decode_workspace,
     )
 
@@ -99,7 +156,7 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
 
     out = torch.zeros(
         num_qo_head, head_dim,
-        dtype=dtype, device="cuda"
+        dtype=dtype, device=device
     )
 
     attn_out = decode_wrapper.run(

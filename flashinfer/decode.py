@@ -348,25 +348,6 @@ def get_batch_decode_mla_module(*args):
     return gen_batch_decode_mla_module(*args).build_and_load()
 
 
-@functools.cache
-def get_decode_estimate_module():
-    return gen_estimate_module().build_and_load()
-
-
-def estimate(
-        query: torch.Tensor,
-        pooling: torch.Tensor,
-        num_valid_pages: int,
-        out: torch.Tensor,
-) -> None:
-    get_decode_estimate_module().estimate(
-        query,
-        pooling,
-        num_valid_pages,
-        out
-    )
-
-
 @overload
 def single_decode_with_kv_cache(
         q: torch.Tensor,

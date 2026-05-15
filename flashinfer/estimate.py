@@ -14,15 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from . import env as jit_env
-from .core import JitSpec, gen_jit_spec
+import functools
+import torch
+from .jit import gen_estimate_module
 
 
-def gen_estimate_module() -> JitSpec:
-    return gen_jit_spec(
-        "estimate",
-        [
-            jit_env.FLASHINFER_CSRC_DIR / "estimate.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "flashinfer_estimate_binding.cu",
-        ],
+@functools.cache
+def get_estimate_module():
+    return gen_estimate_module().build_and_load()
+
+
+def estimate(
+        query: torch.Tensor,
+        pooling: torch.Tensor,
+        num_valid_pages: int,
+        out: torch.Tensor,
+) -> None:
+    get_estimate_module().estimate(
+        query,
+        pooling,
+        num_valid_pages,
+        out
     )

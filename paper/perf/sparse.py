@@ -26,6 +26,7 @@ def bench_sink_sparse_attention(
 
     num_valid_pages = (seq_len - sink + page_size - 1) // page_size
     last_page_len = seq_len - sink - (num_valid_pages - 1) * page_size
+    row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
 
     logits = torch.zeros(
         num_qo_heads, num_total_pages,
@@ -70,7 +71,8 @@ def bench_sink_sparse_attention(
         indptr=indptr_buf,
         indices=indices_buf,
         group_size=group_size,
-        mask_logits=mask_logits
+        mask_logits=mask_logits,
+        row_states_buffer=row_states_buffer
     )
 
     indptr_buf = indptr_buf.cumsum(dim=-1)

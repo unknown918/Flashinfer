@@ -34,7 +34,7 @@ out = torch.zeros(
 
 estimate_overhead = np.median(
     bench_gpu_time(
-        lambda: flashinfer.decode.estimate(
+        lambda: flashinfer.estimate(
             query=query,
             pooling=pooling,
             num_valid_pages=num_valid_pages,
@@ -42,7 +42,7 @@ estimate_overhead = np.median(
         ),
         dry_run_time_ms=100,
         repeat_time_ms=1000,
-        use_cuda_graph=True,
+        # use_cuda_graph=True,
     )
 )
 

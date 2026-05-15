@@ -471,6 +471,13 @@ def topk_bool_mask_logits(
         mask_logits: torch.Tensor,
         row_states_buffer: torch.Tensor,
 ):
+    r"""
+    uncomment this when profiling kernel performance,
+    in end-to-end inference, this overhead can be overlapped by using a alter stream
+    """
+    # indptr.zero_()
+    # indices.zero_()
+    # mask_logits.zero_()
 
     get_topk_module().radix_topk_mask_logits(
         logits,
@@ -479,12 +486,4 @@ def topk_bool_mask_logits(
         top_k, num_valid_pages, last_page_len, group_size, page_size
     )
 
-    """
-    uncomment this when profiling kernel performance,
-    in end-to-end inference, this overhead can be overlapped by using a alter stream
-    """
-    # indptr.zero_()
-    # indices.zero_()
-    # mask_logits.zero_()
-
-    # return indptr, indices
+    return indptr, indices

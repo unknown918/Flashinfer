@@ -7,8 +7,8 @@ torch.manual_seed(42)
 
 def assert_close(a, b):
     rtol, atol = {
-        torch.float16: (5e-3, 5e-3),
-        torch.bfloat16: (3e-2, 3e-2),
+        torch.float16: (1e-3, 1e-3),
+        torch.bfloat16: (1e-2, 1e-2),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
@@ -41,7 +41,7 @@ def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
         dtype=dtype, device=device
     )
 
-    flashinfer.decode.estimate(
+    flashinfer.estimate(
         query=query,
         pooling=pooling,
         num_valid_pages=num_valid_pages,

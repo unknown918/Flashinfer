@@ -6,8 +6,8 @@ import flashinfer
 
 def assert_close(a, b):
     rtol, atol = {
-        torch.float16: (5e-3, 5e-3),
-        torch.bfloat16: (3e-2, 3e-2),
+        torch.float16: (1e-3, 1e-3),
+        torch.bfloat16: (1e-2, 1e-2),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
@@ -23,7 +23,7 @@ def test_append_paged_kv_cache(dtype, page_size, seq_len, decode_iters):
     head_dim = 128
     num_kv_heads = 8
     max_length = 32768
-    device = torch.device("cuda")
+    device = torch.device("cuda:0")
 
     num_pages = (max_length + page_size - 1) // page_size
 

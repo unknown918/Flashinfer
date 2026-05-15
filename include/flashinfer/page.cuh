@@ -250,16 +250,6 @@ __global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_k
   DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, page_entry, tx * vec_size);
   DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, page_entry, tx * vec_size);
 
-  // Key reduction
-  // vec_t<float, vec_size> local_k, local_pool;
-  // local_k.cast_load(key + head_idx * head_dim + tx * vec_size);
-  // if (pooling_entry == 0)
-  //   local_pool.fill(0.0);
-  // else
-  //   local_pool.cast_load(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h + tx * vec_size);
-  // vec_reduce<float, vec_size>(local_pool, local_k);
-  // local_k.cast_store(k_ptr);
-  // local_pool.cast_store(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h + tx * vec_size);
   vec_t<DType, vec_size>::memcpy(v_ptr, value + head_idx * head_dim + tx * vec_size);
   vec_t<DType, vec_size>::memcpy(k_ptr, key + head_idx * head_dim + tx * vec_size);
 

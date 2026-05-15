@@ -1334,7 +1334,7 @@ class SparseSinkAttentionWrapper:
         self._mask_mode = MaskMode.CAUSAL.value if causal else MaskMode.NON_CAUSAL.value
 
         # Sanity check
-        assert num_qo_heads % num_kv_heads == 0, ("num_qo_heads must be a multiple of num_kv_heads")
+        assert num_qo_heads % num_kv_heads == 0, "num_qo_heads must be a multiple of num_kv_heads"
         assert num_kv_heads == kv_indptr.shape[0] - 1
 
         # Ampere-only
@@ -1388,6 +1388,8 @@ class SparseSinkAttentionWrapper:
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
+            kv_indptr: torch.Tensor,
+            kv_indices: torch.Tensor,
             out: torch.Tensor = None,
             lse: Optional[torch.Tensor] = None,
             return_lse: bool = False,
@@ -1437,8 +1439,8 @@ class SparseSinkAttentionWrapper:
             q,
             k,
             v,
-            self._paged_kv_indptr_buf,
-            self._paged_kv_indices_buf,
+            kv_indptr,
+            kv_indices,
             self._paged_kv_last_page_len,
             out,
             lse,

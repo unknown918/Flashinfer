@@ -421,8 +421,9 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
   // NOTE(Zihao): when CUDAGraph is enabled, we will launch more blocks than
   // the actual batch size, so we need to check if the current batch is valid
   if (block_valid_mask && !block_valid_mask[bx]) return;
-  const uint32_t kv_chunk_size = *(params.kv_chunk_size_ptr);
+  // const uint32_t kv_chunk_size = *(params.kv_chunk_size_ptr);
   const uint32_t kv_len = paged_kv.get_length(batch_idx);
+  const uint32_t kv_chunk_size = ceil_div(kv_len, params.o_indptr[batch_idx + 1] - params.o_indptr[batch_idx]);
   const uint32_t max_chunk_size = partition_kv ? kv_chunk_size : kv_len;
   const uint32_t chunk_start = partition_kv ? kv_tile_idx * max_chunk_size : 0;
   const uint32_t chunk_end =

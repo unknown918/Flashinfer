@@ -47,7 +47,7 @@ assert seq_len <= input_ids.shape[1]
 
 # warm up
 for _ in range(3):
-    _ = model.generate(input_ids, max_new_tokens=2) # capture cuda graph
+    _ = model.generate(input_ids, max_new_tokens=2)  # capture cuda graph
     model.ss_flush()
 torch.cuda.synchronize()
 
@@ -71,14 +71,14 @@ torch.cuda.synchronize()
 t1 = time.time()
 outputs = model.generate(
     input_ids[:, -8192:],
-    max_new_tokens=10,
+    max_new_tokens=100,
     do_sample=False,
     temperature=0,
     pad_token_id=tokenizer.eos_token_id
 )
 torch.cuda.synchronize()
 total_time = time.time() - t1
-tpot = (total_time - ttft) / 10
+tpot = (total_time - ttft) / 100
 
 model.ss_flush()
 
@@ -87,16 +87,4 @@ response = tokenizer.decode(new_tokens, skip_special_tokens=True)
 print(response)
 print(f"Seq Len: {seq_len}")
 print(f"Budget: {budget}")
-print(f"TTFT: {ttft}")
-print(f"TPOT: {tpot}")
-
-# sparse
-# Seq Len: 8192
-# Budget: 4096
-# TTFT: 2.154984712600708
-# TPOT: 0.0330620527267456
-
-# dense
-# Seq Len: 8192
-# TTFT: 2.2001969814300537
-# TPOT: 0.0335003137588501
+print(f"TPOT: {tpot * 1e3:3f} ms")
