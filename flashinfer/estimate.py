@@ -27,12 +27,12 @@ def get_estimate_module():
 def estimate(
         query: torch.Tensor,
         pooling: torch.Tensor,
-        num_valid_pages: int,
+        meta_data: torch.Tensor,
         out: torch.Tensor,
 ) -> None:
     get_estimate_module().estimate(
         query,
         pooling,
-        num_valid_pages,
+        meta_data,
         out
     )

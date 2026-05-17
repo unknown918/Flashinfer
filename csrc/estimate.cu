@@ -21,7 +21,7 @@ using namespace flashinfer;
 
 using tvm::ffi::Tensor;
 
-void estimate(TensorView query, TensorView pooling, uint32_t num_valid_pages, TensorView out) {
+void estimate(TensorView query, TensorView pooling, TensorView meta_data, TensorView out) {
   CHECK_CONTIGUOUS(query)
   CHECK_CONTIGUOUS(pooling)
   CHECK_CONTIGUOUS(out)
@@ -44,7 +44,7 @@ void estimate(TensorView query, TensorView pooling, uint32_t num_valid_pages, Te
       cudaError_t status = Estimate<HEAD_DIM, c_type>(
           static_cast<c_type*>(query.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
           static_cast<c_type*>(out.data_ptr()), static_cast<uint32_t>(num_qo_heads),
-          static_cast<uint32_t>(num_kv_heads), static_cast<uint32_t>(num_valid_pages),
+          static_cast<uint32_t>(num_kv_heads), static_cast<uint32_t*>(meta_data.data_ptr()),
           static_cast<uint32_t>(num_total_pages), stream);
       TVM_FFI_ICHECK(status == cudaSuccess)
           << "estimation failed with error: " << cudaGetErrorString(status);

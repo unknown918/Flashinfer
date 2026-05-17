@@ -31,13 +31,15 @@ out = torch.zeros(
     num_qo_heads, num_total_pages,
     dtype=dtype, device=device
 )
+meta_data = torch.zeros(3, dtype=torch.int32, device=device)
+meta_data[0] = num_valid_pages
 
 estimate_overhead = np.median(
     bench_gpu_time(
         lambda: flashinfer.estimate(
             query=query,
             pooling=pooling,
-            num_valid_pages=num_valid_pages,
+            meta_data=meta_data,
             out=out,
         ),
         dry_run_time_ms=100,

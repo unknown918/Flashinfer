@@ -82,13 +82,17 @@ __device__ __forceinline__ void compute_qk(const DType* smem, const vec_t<float,
 
 template <typename DType, uint32_t num_stages_smem, uint32_t tile_size_per_bdx, uint32_t vec_size,
           uint32_t bdx, uint32_t bdy, uint32_t bdz>
-__global__ void EstimationKernel(DType* q, DType* k, uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                 uint32_t num_valid_pages, uint32_t num_total_pages,
-                                 uint32_t kv_chunk_size, DType* out) {
+__global__ void EstimationKernel(DType* __restrict__ q, DType* __restrict__ k,
+                                 uint32_t num_qo_heads, uint32_t num_kv_heads,
+                                 const uint32_t* meta_data, uint32_t num_total_pages, DType* out) {
   constexpr uint32_t head_dim = bdx * vec_size;
 
   uint32_t kv_chunk_idx = blockIdx.x;
   uint32_t kv_head_idx = blockIdx.y;
+
+  const uint32_t num_chunks = gridDim.x;
+  const uint32_t num_valid_pages = meta_data[0];
+  const uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
 
   uint32_t qo_head_idx = kv_head_idx * bdy + threadIdx.y;
   uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
@@ -186,9 +190,8 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
  * \return status Indicates whether CUDA calls are successful
  */
 template <uint32_t HEAD_DIM, typename DType>
-cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __restrict__ out,
-                     uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t num_valid_pages,
-                     uint32_t num_total_pages, cudaStream_t stream) {
+cudaError_t Estimate(DType* q, DType* k, DType* out, uint32_t num_qo_heads, uint32_t num_kv_heads,
+                     uint32_t* meta_data, uint32_t num_total_pages, cudaStream_t stream) {
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DType), HEAD_DIM / 32UL);
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   auto compute_capacity = GetCudaComputeCapability();
@@ -217,7 +220,7 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
 
       uint32_t max_grid_size = uint32_t(num_blocks_per_sm) * uint32_t(num_sm);
       uint32_t num_chunks = max_grid_size / num_kv_heads;
-      uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
+      // uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
 
       // no need to use partition-kv
       dim3 nblks = dim3(num_chunks, num_kv_heads);
@@ -227,9 +230,8 @@ cudaError_t Estimate(DType* __restrict__ q, DType* __restrict__ k, DType* __rest
                       (void*)&k,
                       (void*)&num_qo_heads,
                       (void*)&num_kv_heads,
-                      (void*)&num_valid_pages,
+                      (void*)&meta_data,
                       (void*)&num_total_pages,
-                      (void*)&kv_chunk_size,
                       (void*)&out};
       FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
       return cudaSuccess;

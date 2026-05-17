@@ -13,8 +13,8 @@ def assert_close(a, b):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16])  # fixme: torch.bfloat16 has precision bug
-@pytest.mark.parametrize("topk", [8, 15, 16])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 3351, 6666, 7777, 8888, 5537])
+@pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
 def test_sparse_sink_attention(dtype, topk, seq_len):
     torch.manual_seed(42)
 
@@ -35,6 +35,9 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
 
     num_valid_pages = (seq_len - sink_size + page_size - 1) // page_size
     last_page_len = seq_len - sink_size - (num_valid_pages - 1) * page_size
+    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    meta_data[0] = num_valid_pages
+    meta_data[1] = last_page_len
 
     logits = torch.randn(
         num_qo_head, num_total_pages,
@@ -105,32 +108,32 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
         device=device
     )
 
-    indices_buf = torch.zeros(
+    indices = torch.zeros(
         num_kv_head * (sink_size + topk * group_size * page_size),
         dtype=torch.uint32,
         device=device
     )
 
     mask_logits = torch.zeros(
-        num_kv_head, num_total_pages,
+        num_kv_head,
+        num_total_pages,
         dtype=torch.uint32,
         device=device
     )
 
-    _indptr, _indices = flashinfer.topk_bool_mask_logits(
+    flashinfer.topk_bool_mask_logits(
         top_k=topk - 1,
         page_size=page_size,
-        last_page_len=last_page_len,
-        num_valid_pages=num_valid_pages - 1,
+        meta_data=meta_data,
         logits=logits,
         indptr=indptr,
-        indices=indices_buf,
+        indices=indices,
         group_size=group_size,
         mask_logits=mask_logits,
         row_states_buffer=row_states_buffer
     )
 
-    _indptr = _indptr.cumsum(dim=-1)
+    indptr = indptr.cumsum(dim=-1)
 
     decode_workspace = torch.empty(
         128 * 1024 * 1024, dtype=torch.uint8, device=device
@@ -142,8 +145,8 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     )
 
     decode_wrapper.plan(
-        kv_indptr=_indptr.to(torch.int32),
-        kv_indices=_indices.to(torch.int32),
+        kv_indptr=indptr.to(torch.int32),
+        kv_indices=indices.to(torch.int32),
         num_qo_heads=num_qo_head,
         num_kv_heads=num_kv_head,
         head_dim=head_dim,
@@ -155,14 +158,18 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     v_decode = v.transpose(0, 1).unsqueeze(1).contiguous()
 
     out = torch.zeros(
-        num_qo_head, head_dim,
-        dtype=dtype, device=device
+        num_qo_head,
+        head_dim,
+        dtype=dtype,
+        device=device
     )
 
     attn_out = decode_wrapper.run(
         q=q_decode,
         k=k_decode,
         v=v_decode,
+        kv_indptr=indptr.to(torch.int32),
+        kv_indices=indices.to(torch.int32),
         out=out,
         return_lse=False
     )
@@ -171,7 +178,7 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
 
     torch.testing.assert_close(
         ref_wrapper._paged_kv_indptr_buf,
-        _indptr.to(torch.int32)
+        indptr.to(torch.int32)
     )
 
     assert_close(attn_out, attn_ref[:, 0])

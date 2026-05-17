@@ -140,8 +140,7 @@ def get_topk_module():
             indices: torch.Tensor,
             row_states_buffer: Optional[torch.Tensor],
             top_k: int,
-            num_valid_pages: int,
-            last_page_len: int,
+            meta_data: torch.Tensor,
             group_size: int,
             page_size: int,
     ) -> None:
@@ -154,7 +153,7 @@ def get_topk_module():
             logits, mask_logits,
             indptr, indices,
             row_states_buffer,
-            top_k, num_valid_pages, last_page_len, group_size, page_size
+            top_k, meta_data, group_size, page_size
         )
 
     @register_fake_op("flashinfer::radix_topk_mask_logits")
@@ -165,8 +164,7 @@ def get_topk_module():
             indices: torch.Tensor,
             row_states_buffer: Optional[torch.Tensor],
             top_k: int,
-            num_valid_pages: int,
-            last_page_len: int,
+            meta_data: torch.Tensor,
             group_size: int,
             page_size: int,
     ) -> torch.Tensor:
@@ -462,8 +460,11 @@ def top_k_ragged_transform(
 def topk_bool_mask_logits(
         top_k: int,
         page_size: int,
-        last_page_len: int,
-        num_valid_pages: int,
+        # last_page_len: int,
+        # num_valid_pages: int,
+        meta_data: torch.Tensor,
+        # last_page_len=self.last_page_len,
+        # num_valid_pages=self.num_valid_pages - 1,  # always select last page
         logits: torch.Tensor,
         indptr: torch.Tensor,
         indices: torch.Tensor,
@@ -483,7 +484,7 @@ def topk_bool_mask_logits(
         logits,
         mask_logits, indptr, indices,
         row_states_buffer,
-        top_k, num_valid_pages, last_page_len, group_size, page_size
+        top_k, meta_data, group_size, page_size
     )
 
     return indptr, indices

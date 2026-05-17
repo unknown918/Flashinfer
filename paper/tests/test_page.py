@@ -15,7 +15,7 @@ def assert_close(a, b):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("page_size, decode_iters", [(16, 33), (32, 65), (64, 129)])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 3351, 6666, 7777, 8888, 5537])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32600])
 def test_append_paged_kv_cache(dtype, page_size, seq_len, decode_iters):
     torch.manual_seed(42)
 

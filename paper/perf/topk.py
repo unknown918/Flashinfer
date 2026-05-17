@@ -18,6 +18,9 @@ group_size = num_qo_head // num_kv_head
 num_total_pages = max_length // page_size
 num_valid_pages = (seq_len - 4 + page_size - 1) // page_size
 last_page_len = (seq_len - 4) - (num_valid_pages - 1) * page_size
+meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+meta_data[0] = num_valid_pages
+meta_data[1] = last_page_len
 
 logits = torch.zeros(
     num_qo_head, num_total_pages,
@@ -56,8 +59,7 @@ topk_overhead = np.median(
         lambda: flashinfer.topk_bool_mask_logits(
             top_k=k - 1,
             page_size=page_size,
-            last_page_len=last_page_len,
-            num_valid_pages=num_valid_pages - 1,
+            meta_data=meta_data,
             logits=logits,
             indptr=indptr,
             indices=indices,

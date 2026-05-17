@@ -17,7 +17,7 @@ def assert_close(a, b):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("page_size", [16, 32, 64])
 @pytest.mark.parametrize("num_kv_heads,num_qo_heads", [(8, 32)])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 3351, 6666, 7777, 8888, 5537])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
 def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
     head_dim = 128
     max_length = 32768
@@ -40,11 +40,13 @@ def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
         num_qo_heads, num_total_pages,
         dtype=dtype, device=device
     )
+    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    meta_data[0] = num_valid_pages
 
     flashinfer.estimate(
         query=query,
         pooling=pooling,
-        num_valid_pages=num_valid_pages,
+        meta_data=meta_data,
         out=out,
     )
 

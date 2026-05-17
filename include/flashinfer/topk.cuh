@@ -1016,10 +1016,9 @@ template <uint32_t BLOCK_THREADS, uint32_t VEC_SIZE, bool SINGLE_CTA, typename D
 __global__ void __launch_bounds__(BLOCK_THREADS)
     RadixTopKBoolMaskKernel_MultiCTA(DType* logits, IdType* mask_logits, IdType* indptr,
                                      IdType* indices, IdType* top_k_arr, uint32_t top_k_val,
-                                     uint32_t num_valid_pages, uint32_t row_size,
-                                     uint32_t batch_size, uint32_t group_size, uint32_t page_size,
-                                     uint32_t last_page_len, RadixRowState* row_states,
-                                     uint32_t chunk_size, uint32_t ctas_per_group) {
+                                     uint32_t row_size, uint32_t batch_size, uint32_t group_size,
+                                     uint32_t page_size, uint32_t* meta_data,
+                                     RadixRowState* row_states, uint32_t ctas_per_group) {
   auto grid = cg::this_grid();
 
   // Type traits for FP16/BF16/FP32 support
@@ -1059,16 +1058,19 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
 
   int barrier_phase = 0;
 
+  // only do radix select for values within `num_valid pages`
+  const uint32_t num_valid_pages = meta_data[0] - 1;
+  const uint32_t last_page_len = meta_data[1];
+  const uint32_t chunk_size = num_valid_pages;
+  const uint32_t chunk_start = cta_in_group * chunk_size;
+  const uint32_t chunk_end = min(chunk_start + chunk_size, num_valid_pages);
+  const uint32_t actual_chunk_size = chunk_end - chunk_start;
+
   // Persistent loop over rows
   for (uint32_t iter = 0; iter < total_iterations; iter++) {
     uint32_t row_idx = group_id + iter * num_groups;
 
     if (row_idx >= batch_size) break;
-
-    // only do radix select for values within `num_valid pages`
-    const uint32_t chunk_start = cta_in_group * chunk_size;
-    const uint32_t chunk_end = min(chunk_start + chunk_size, num_valid_pages);
-    const uint32_t actual_chunk_size = chunk_end - chunk_start;
 
     uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
 
@@ -1167,20 +1169,21 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
       // kv layout: (num_pages, page_size, num_kv_heads)
       for (uint32_t i = 0; i < ceil_div(page_size, 32); i++) {
         token_idx = (lane_id + i * 32) % page_size;
-        indices[start_pos + token_idx] = (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
+        indices[start_pos + token_idx] =
+            (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
       }
       ballot_mask &= ballot_mask - 1;
       count++;
     }
     row_end = (row_start + indptr[row_idx + 1]) * page_size + (row_idx + 1) * (4 + last_page_len);
-    if (page_idx == 0)
-      indptr[row_idx + 1] = indptr[row_idx + 1] * page_size + 4 + last_page_len;
+    if (page_idx == 0) indptr[row_idx + 1] = indptr[row_idx + 1] * page_size + 4 + last_page_len;
     if (page_idx < 4) {
       row_start = row_start * page_size + row_idx * (4 + last_page_len);
       indices[row_start + page_idx] = page_idx * batch_size + row_idx;
     }
     if (page_idx < last_page_len)
-      indices[row_end - last_page_len + page_idx] = (4 + num_valid_pages * page_size + page_idx) * batch_size + row_idx;
+      indices[row_end - last_page_len + page_idx] =
+          (4 + num_valid_pages * page_size + page_idx) * batch_size + row_idx;
   }
   // Clear histogram buffers and reset arrival counter for next kernel launch (only for multi-CTA)
   if constexpr (!SINGLE_CTA) {
@@ -1202,8 +1205,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
 template <typename DType, typename IdType>
 cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdType* indptr,
                                         IdType* indices, IdType* top_k_arr, uint32_t batch_size,
-                                        uint32_t top_k_val, uint32_t seq_len,
-                                        uint32_t last_page_len, uint32_t row_size,
+                                        uint32_t top_k_val, uint32_t* meta_data, uint32_t row_size,
                                         uint32_t page_size, uint32_t group_size,
                                         RadixRowState* row_states_buffer, cudaStream_t stream) {
   using OrderedType = typename RadixTopKTraits<DType>::OrderedType;
@@ -1230,12 +1232,19 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   const uint32_t min_chunk_size = vec_size * BLOCK_THREADS;
   max_chunk_elements = std::max(max_chunk_elements, min_chunk_size);
 
-  uint32_t ctas_per_group = ceil_div(seq_len, max_chunk_elements);
-  uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
-  chunk_size = round_up(chunk_size, vec_size);
-  chunk_size = std::min(chunk_size, max_chunk_elements);
+  // (yqj) note: set to one for cuda graph
+  // uint32_t ctas_per_group = ceil_div(seq_len, max_chunk_elements);
+  // uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
+  // chunk_size = round_up(chunk_size, vec_size);
+  // chunk_size = std::min(chunk_size, max_chunk_elements);
+  //
+  // const uint32_t smem_size = fixed_smem_aligned + chunk_size * sizeof(OrderedType);
 
-  const uint32_t smem_size = fixed_smem_aligned + chunk_size * sizeof(OrderedType);
+  uint32_t ctas_per_group = 1;
+  // uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
+  // chunk_size = round_up(chunk_size, vec_size);
+  // chunk_size = std::min(chunk_size, max_chunk_elements);
+  const uint32_t smem_size = fixed_smem_aligned + row_size * sizeof(OrderedType);
   const bool single_cta = (ctas_per_group == 1);
 
   // Calculate number of groups (how many rows to process concurrently)
@@ -1252,21 +1261,9 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
 
-      void* args[] = {&logits,
-                      &mask_logits,
-                      &indptr,
-                      &indices,
-                      &top_k_arr,
-                      &top_k_val,
-                      &seq_len,
-                      &row_size,
-                      &batch_size,
-                      &group_size,
-                      &page_size,
-                      &last_page_len,
-                      &row_states_buffer,
-                      &chunk_size,
-                      &ctas_per_group};
+      void* args[] = {&logits,    &mask_logits,       &indptr,        &indices,    &top_k_arr,
+                      &top_k_val, &row_size,          &batch_size,    &group_size, &page_size,
+                      &meta_data, &row_states_buffer, &ctas_per_group};
       FLASHINFER_CUDA_CALL(
           cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
     } else {
@@ -1276,21 +1273,9 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
-      void* args[] = {&logits,
-                      &mask_logits,
-                      &indptr,
-                      &indices,
-                      &top_k_arr,
-                      &top_k_val,
-                      &seq_len,
-                      &row_size,
-                      &batch_size,
-                      &group_size,
-                      &page_size,
-                      &last_page_len,
-                      &row_states_buffer,
-                      &chunk_size,
-                      &ctas_per_group};
+      void* args[] = {&logits,    &mask_logits,       &indptr,        &indices,    &top_k_arr,
+                      &top_k_val, &row_size,          &batch_size,    &group_size, &page_size,
+                      &meta_data, &row_states_buffer, &ctas_per_group};
       FLASHINFER_CUDA_CALL(
           cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
     }

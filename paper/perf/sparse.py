@@ -27,6 +27,9 @@ def bench_sink_sparse_attention(
     num_valid_pages = (seq_len - sink + page_size - 1) // page_size
     last_page_len = seq_len - sink - (num_valid_pages - 1) * page_size
     row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    meta_data[0] = num_valid_pages
+    meta_data[1] = last_page_len
 
     logits = torch.zeros(
         num_qo_heads, num_total_pages,
@@ -65,8 +68,7 @@ def bench_sink_sparse_attention(
     flashinfer.topk_bool_mask_logits(
         top_k=top_k - 1,
         page_size=page_size,
-        last_page_len=last_page_len,
-        num_valid_pages=num_valid_pages - 1,
+        meta_data=meta_data,
         logits=logits,
         indptr=indptr_buf,
         indices=indices_buf,
@@ -107,6 +109,8 @@ def bench_sink_sparse_attention(
                 q=q,
                 k=k.unsqueeze(1),
                 v=v.unsqueeze(1),
+                kv_indptr=indptr_buf.to(torch.int32),
+                kv_indices=indices_buf.to(torch.int32),
                 out=out,
                 return_lse=False
             ),
@@ -145,9 +149,9 @@ if __name__ == "__main__":
     for num_qo_heads in [32]:
         for num_kv_heads in [8]:
             for head_dim in [128]:
-                for seq_len in [32760]:
+                for seq_len in [16384]:
                     for page_size in [32]:
-                        for top_k in [64]:
+                        for top_k in [32]:
                             bench_sink_sparse_attention(
                                 top_k,
                                 seq_len,

@@ -73,6 +73,9 @@ class AttentionRunner:
         # static buffer for decode cuda graph
         self.topk -= 1
         self.q = torch.zeros(num_qo_heads, head_dim, dtype=dtype, device=self.device).contiguous()
+        # num_valid_pages, last_page_len
+        self.meta_buffer_host = torch.zeros(3, dtype=torch.int32, device="cpu", pin_memory=True)
+        self.meta_buffer_device = torch.zeros(3, dtype=torch.int32, device=self.device)
         self.graphs = [
             # (torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph())
             torch.cuda.CUDAGraph()
@@ -175,38 +178,40 @@ class AttentionRunner:
             )
             return output
 
-        self.q.copy_(q)
         self.layer_id = layer_id
-
         self.num_valid_pages = (self.cache_manager.seq_len - self.sink + self.page_size - 1) // self.page_size
         self.last_page_len = self.cache_manager.seq_len - self.sink - (self.num_valid_pages - 1) * self.page_size
-
-        flashinfer.estimate(
-            query=self.q,
-            pooling=self.cache_manager.pooling[self.layer_id] / self.cache_manager.page_size,
-            num_valid_pages=self.num_valid_pages,
-            out=self.logits,
-        )
-
-        # expand top-k token's indices
-        flashinfer.topk_bool_mask_logits(
-            top_k=self.topk,
-            page_size=self.page_size,
-            last_page_len=self.last_page_len,
-            num_valid_pages=self.num_valid_pages - 1,  # always select last page
-            logits=self.logits,
-            indptr=self.indptr,
-            indices=self.indices,
-            group_size=self.group_size,
-            mask_logits=self.mask_logits,
-            row_states_buffer=self.row_states_buffer,
-        )
+        self.meta_buffer_host[0] = self.num_valid_pages
+        self.meta_buffer_host[1] = self.last_page_len
+        self.q.copy_(q)
 
         g = self.graphs[self.layer_id - 2]
         if not self.graph_captured[self.layer_id - 2]:
             self.graph_captured[layer_id - 2] = True
             with torch.cuda.graph(g):
+                self.meta_buffer_device.copy_(self.meta_buffer_host, non_blocking=True)
+                flashinfer.estimate(
+                    query=self.q,
+                    pooling=self.cache_manager.pooling[self.layer_id],  # / self.cache_manager.page_size,
+                    meta_data=self.meta_buffer_device,
+                    out=self.logits,
+                )
+
+                # expand top-k token's indices
+                flashinfer.topk_bool_mask_logits(
+                    top_k=self.topk,
+                    page_size=self.page_size,
+                    meta_data=self.meta_buffer_device,
+                    logits=self.logits,
+                    indptr=self.indptr,
+                    indices=self.indices,
+                    group_size=self.group_size,
+                    mask_logits=self.mask_logits,
+                    row_states_buffer=self.row_states_buffer,
+                )
+
                 torch.cumsum(self.indptr, dim=0, dtype=torch.int32, out=self.indptr)
+
                 self.decode_wrapper.run(
                     q=self.q,
                     k=self.cache_manager.paged_k_cache[self.layer_id],
@@ -216,12 +221,12 @@ class AttentionRunner:
                     out=self.output,
                     return_lse=False
                 )
+
+                self.indptr.zero_()
+                self.indices.zero_()
+                self.logits.zero_()
+                self.mask_logits.zero_()
         else:
             g.replay()
-
-        self.indptr.zero_()
-        self.indices.zero_()
-        self.logits.zero_()
-        self.mask_logits.zero_()
 
         return self.output

@@ -4,7 +4,7 @@ import flashinfer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 1192, 5528, 3351, 6666, 7777, 8888, 5537])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
 @pytest.mark.parametrize("page_size", [16, 32])  # fixme: page_size=64 has bug
 def test_topk_bool_mask_logits(seq_len, page_size):
     torch.manual_seed(42)
@@ -20,6 +20,9 @@ def test_topk_bool_mask_logits(seq_len, page_size):
     num_total_pages = max_length // page_size
     num_valid_pages = (seq_len - 4 + page_size - 1) // page_size
     last_page_len = (seq_len - 4) - (num_valid_pages - 1) * page_size
+    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    meta_data[0] = num_valid_pages
+    meta_data[1] = last_page_len
     row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
 
     assert last_page_len > 0
@@ -100,8 +103,7 @@ def test_topk_bool_mask_logits(seq_len, page_size):
     _indptr, _indices = flashinfer.topk_bool_mask_logits(
         top_k=k - 1,
         page_size=page_size,
-        last_page_len=last_page_len,
-        num_valid_pages=num_valid_pages - 1,
+        meta_data=meta_data,
         logits=logits,
         indptr=indptr,
         indices=indices,

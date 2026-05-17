@@ -150,12 +150,11 @@ void radix_topk_ragged_transform(TensorView input, TensorView output_indices, Te
 
 void radix_topk_mask_logits(TensorView logits, TensorView mask_logits, TensorView indptr,
                             TensorView indices, TensorView row_states_buffer, int64_t top_k_val,
-                            uint32_t seq_len, uint32_t last_page_len, uint32_t group_size,
-                            uint32_t page_size) {
+                            TensorView meta_data, uint32_t group_size, uint32_t page_size) {
   CHECK_INPUT(logits);
   CHECK_INPUT(indptr);
-  CHECK_DIM(2, logits);   // (batch_size, row_size), but only [0, seq_len) has value
-  CHECK_DIM(1, indptr);   // (batch_size + 1)
+  CHECK_DIM(2, logits);  // (batch_size, row_size), but only [0, seq_len) has value
+  CHECK_DIM(1, indptr);  // (batch_size + 1)
   CHECK_DIM(1, indices);
 
   uint32_t batch_size = logits.size(0);
@@ -176,8 +175,9 @@ void radix_topk_mask_logits(TensorView logits, TensorView mask_logits, TensorVie
     status = sampling::RadixTopKMaskLogitsMultiCTA<c_type, uint32_t>(
         static_cast<c_type*>(logits.data_ptr()), static_cast<uint32_t*>(mask_logits.data_ptr()),
         static_cast<uint32_t*>(indptr.data_ptr()), static_cast<uint32_t*>(indices.data_ptr()),
-        nullptr, batch_size, static_cast<uint32_t>(top_k_val), seq_len, last_page_len, row_size,
-        page_size, group_size, row_states_ptr, stream);
+        nullptr, batch_size, static_cast<uint32_t>(top_k_val),
+        static_cast<uint32_t*>(meta_data.data_ptr()), row_size, page_size, group_size,
+        row_states_ptr, stream);
     return true;
   });
 
