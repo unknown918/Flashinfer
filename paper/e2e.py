@@ -6,7 +6,7 @@ from paper.models.llama import LlamaForCausalLM
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
-device = torch.device("cuda")
+device = torch.device("cuda:2")
 model_id = "./Llama-3.1-8B-Instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -28,8 +28,8 @@ messages = [
     },
 ]
 
-seq_len = 10000
-budget = 2048
+seq_len = 31488
+budget = 512
 
 input_ids = tokenizer.apply_chat_template(
     messages,
@@ -39,7 +39,7 @@ input_ids = tokenizer.apply_chat_template(
 
 with torch.inference_mode():
     model.ss_init(
-        device="cuda",
+        device="cuda:2",
         budget=budget,
         page_size=32,
         max_length=32768,

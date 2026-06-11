@@ -1,5 +1,4 @@
 import torch
-import argparse
 import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from paper.models.llama import LlamaForCausalLM
@@ -20,6 +19,7 @@ messages = [
 
 seq_len = 8192
 
+import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--is_sparse", action="store_true")
 args = parser.parse_args()

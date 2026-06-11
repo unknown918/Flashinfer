@@ -138,8 +138,8 @@ def bench_sink_sparse_attention(
     sparsity = indptr_buf[-1] / (num_kv_heads * seq_len)
 
     print(
-        f"seq_len={seq_len}, top_k={top_k}, page_size={page_size}, "
-        f"sparsity={sparsity:.3f}, "
+        f"sparsity: {sparsity:.3f}, speed up: {(dense_ms / sparse_ms):.2f}x\n"
+        f"seq_len: {seq_len}, budget: {top_k * page_size}, "
         f"sparse fa2 time: {sparse_ms * 1e3:.3f} us, "
         f"dense fa2 time: {dense_ms * 1e3:.3f} us"
     )
@@ -149,9 +149,9 @@ if __name__ == "__main__":
     for num_qo_heads in [32]:
         for num_kv_heads in [8]:
             for head_dim in [128]:
-                for seq_len in [16384]:
+                for seq_len in [8192, 16384, 32000]:
                     for page_size in [32]:
-                        for top_k in [32]:
+                        for top_k in [16, 32, 64]:
                             bench_sink_sparse_attention(
                                 top_k,
                                 seq_len,

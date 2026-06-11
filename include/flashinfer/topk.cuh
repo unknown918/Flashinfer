@@ -1025,7 +1025,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   using Traits = RadixTopKTraits<DType>;
   using OrderedType = typename Traits::OrderedType;
 
-  constexpr uint32_t RADIX = 512;  // 8-bit radix
+  constexpr uint32_t RADIX = 256;  // 8-bit radix
 
   const uint32_t global_cta_id = blockIdx.x;
   const uint32_t group_id = global_cta_id / ctas_per_group;
@@ -1059,12 +1059,12 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   int barrier_phase = 0;
 
   // only do radix select for values within `num_valid pages`
-  const uint32_t num_valid_pages = meta_data[0] - 1;
-  const uint32_t last_page_len = meta_data[1];
-  const uint32_t chunk_size = num_valid_pages;
-  const uint32_t chunk_start = cta_in_group * chunk_size;
-  const uint32_t chunk_end = min(chunk_start + chunk_size, num_valid_pages);
-  const uint32_t actual_chunk_size = chunk_end - chunk_start;
+  uint32_t num_valid_pages = meta_data[0];
+  uint32_t last_page_len = meta_data[1];
+  uint32_t chunk_size = num_valid_pages;
+  uint32_t chunk_start = cta_in_group * chunk_size;
+  uint32_t chunk_end = min(chunk_start + chunk_size, num_valid_pages);
+  uint32_t actual_chunk_size = chunk_end - chunk_start;
 
   // Persistent loop over rows
   for (uint32_t iter = 0; iter < total_iterations; iter++) {
@@ -1076,7 +1076,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
 
     DType pivot = Traits::NegInf();
 
-    if (k >= num_valid_pages) {  // k >= seq_len: no masking needed, just copy
+    if (k >= num_valid_pages) {  // bool masking is all true
       const uint32_t aligned_size = (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
 #pragma unroll
       for (uint32_t i = aligned_size + tx; i < actual_chunk_size; i += BLOCK_THREADS) {
@@ -1169,9 +1169,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
       // kv layout: (num_pages, page_size, num_kv_heads)
       for (uint32_t i = 0; i < ceil_div(page_size, 32); i++) {
         token_idx = (lane_id + i * 32) % page_size;
-        indices[start_pos + token_idx] =
-            (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
+        indices[start_pos + token_idx] = (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
       }
+      // indices[start_pos + lane_id] = (4 + tmp_idx * page_size + lane_id) * batch_size + row_idx;
       ballot_mask &= ballot_mask - 1;
       count++;
     }
@@ -1222,7 +1222,7 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
       cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
 
   // Fixed shared memory overhead: histogram[256] + suffix_sum[256] + 5 scalars
-  constexpr size_t fixed_smem_size = sizeof(uint32_t) * (512 + 512 + 5);
+  constexpr size_t fixed_smem_size = sizeof(uint32_t) * (256 + 256 + 5);
   constexpr size_t fixed_smem_aligned = round_up(fixed_smem_size, 16);
 
   // Calculate max chunk size that fits in shared memory
@@ -1231,8 +1231,10 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   max_chunk_elements = round_down(max_chunk_elements, vec_size);
   const uint32_t min_chunk_size = vec_size * BLOCK_THREADS;
   max_chunk_elements = std::max(max_chunk_elements, min_chunk_size);
+  // printf("max_chunk_elements: %d\n", max_chunk_elements);
+  // printf("top_k_val: %d\n", top_k_val);
 
-  // (yqj) note: set to one for cuda graph
+  // (yqj) note: set to one for cuda graph, seq_len is now on GPU
   // uint32_t ctas_per_group = ceil_div(seq_len, max_chunk_elements);
   // uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
   // chunk_size = round_up(chunk_size, vec_size);
@@ -1240,10 +1242,11 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   //
   // const uint32_t smem_size = fixed_smem_aligned + chunk_size * sizeof(OrderedType);
 
-  uint32_t ctas_per_group = 1;
   // uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
   // chunk_size = round_up(chunk_size, vec_size);
   // chunk_size = std::min(chunk_size, max_chunk_elements);
+
+  uint32_t ctas_per_group = 1;
   const uint32_t smem_size = fixed_smem_aligned + row_size * sizeof(OrderedType);
   const bool single_cta = (ctas_per_group == 1);
 
@@ -1255,8 +1258,7 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
     if (single_cta) {
       auto kernel = RadixTopKBoolMaskKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, true, DType, IdType>;
-      FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
@@ -1268,8 +1270,7 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
           cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
     } else {
       auto kernel = RadixTopKBoolMaskKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, false, DType, IdType>;
-      FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);

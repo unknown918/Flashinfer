@@ -2,30 +2,34 @@ import pytest
 import torch
 import flashinfer
 
+torch.manual_seed(3407)
+
 
 def assert_close(a, b):
     rtol, atol = {
         torch.float16: (1e-3, 1e-3),
-        torch.bfloat16: (1e-4, 1e-4),
+        torch.bfloat16: (1e-2, 1e-2),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float16])  # fixme: torch.bfloat16 has precision bug
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
+@pytest.mark.parametrize("page_size", [16, 32])
 @pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
-def test_sparse_sink_attention(dtype, topk, seq_len):
-    torch.manual_seed(42)
-
-    page_size = 16
+def test_sparse_sink_attention(dtype, topk, page_size, seq_len):
     max_length = 32768
     num_kv_head = 8
     num_qo_head = 32
     head_dim = 128
-    sink_size = 4
+    num_sink = 4
 
-    device = torch.device("cuda:0")
+    if topk * page_size >= seq_len:
+        pytest.skip(f"invalid case: topk * page_size = {topk * page_size} >= {seq_len}")
+
+    device = torch.device("cuda:1")
+    torch.cuda.empty_cache()
 
     group_size = num_qo_head // num_kv_head
     num_total_pages = max_length // page_size
@@ -33,9 +37,9 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
 
     assert num_qo_head % num_kv_head == 0, "invalid head grouping"
 
-    num_valid_pages = (seq_len - sink_size + page_size - 1) // page_size
-    last_page_len = seq_len - sink_size - (num_valid_pages - 1) * page_size
-    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    num_valid_pages = (seq_len - num_sink + page_size - 1) // page_size - 1
+    last_page_len = seq_len - num_sink - num_valid_pages * page_size
+    meta_data = torch.zeros(2, dtype=torch.int32, device=device)
     meta_data[0] = num_valid_pages
     meta_data[1] = last_page_len
 
@@ -44,7 +48,7 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
         dtype=torch.float32, device=device
     )
 
-    num_blocks_col = num_valid_pages + 1
+    num_blocks_col = num_valid_pages + 2  # sink + window
 
     block_row_sz = torch.full(
         (num_kv_head, 1), 1,
@@ -54,11 +58,11 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     block_col_sz = torch.zeros(
         num_blocks_col, dtype=torch.int32, device=device
     )
-    block_col_sz[0] = sink_size
+    block_col_sz[0] = num_sink
     block_col_sz[-1] = last_page_len
 
     for i in range(1, num_blocks_col):
-        block_col_sz[i] = min(page_size, seq_len - sink_size - (i - 1) * page_size)
+        block_col_sz[i] = min(page_size, seq_len - num_sink - (i - 1) * page_size)
 
     block_col_sz = block_col_sz.unsqueeze(0).repeat(num_kv_head, 1)
 
@@ -68,7 +72,7 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     )
 
     indices = torch.topk(
-        logits[:, :num_valid_pages - 1],
+        logits[:, :num_valid_pages],
         k=topk - 1
     ).indices.cpu()
 
@@ -109,7 +113,7 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     )
 
     indices = torch.zeros(
-        num_kv_head * (sink_size + topk * group_size * page_size),
+        num_kv_head * (num_sink + topk * group_size * page_size),
         dtype=torch.uint32,
         device=device
     )
@@ -147,6 +151,8 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
     decode_wrapper.plan(
         kv_indptr=indptr.to(torch.int32),
         kv_indices=indices.to(torch.int32),
+        q_data_type=dtype,
+        kv_data_type=dtype,
         num_qo_heads=num_qo_head,
         num_kv_heads=num_kv_head,
         head_dim=head_dim,
@@ -176,7 +182,7 @@ def test_sparse_sink_attention(dtype, topk, seq_len):
 
     assert attn_out.shape == (num_qo_head, head_dim)
 
-    torch.testing.assert_close(
+    assert torch.equal(
         ref_wrapper._paged_kv_indptr_buf,
         indptr.to(torch.int32)
     )

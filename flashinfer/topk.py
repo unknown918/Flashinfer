@@ -460,11 +460,7 @@ def top_k_ragged_transform(
 def topk_bool_mask_logits(
         top_k: int,
         page_size: int,
-        # last_page_len: int,
-        # num_valid_pages: int,
         meta_data: torch.Tensor,
-        # last_page_len=self.last_page_len,
-        # num_valid_pages=self.num_valid_pages - 1,  # always select last page
         logits: torch.Tensor,
         indptr: torch.Tensor,
         indices: torch.Tensor,
@@ -476,9 +472,9 @@ def topk_bool_mask_logits(
     uncomment this when profiling kernel performance,
     in end-to-end inference, this overhead can be overlapped by using a alter stream
     """
-    # indptr.zero_()
-    # indices.zero_()
-    # mask_logits.zero_()
+    indptr.zero_()
+    indices.zero_()
+    mask_logits.zero_()
 
     get_topk_module().radix_topk_mask_logits(
         logits,

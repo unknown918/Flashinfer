@@ -84,19 +84,25 @@ template <typename DType, uint32_t num_stages_smem, uint32_t tile_size_per_bdx, 
           uint32_t bdx, uint32_t bdy, uint32_t bdz>
 __global__ void EstimationKernel(DType* __restrict__ q, DType* __restrict__ k,
                                  uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                 const uint32_t* meta_data, uint32_t num_total_pages, DType* out) {
+                                 uint32_t* meta_data, uint32_t num_total_pages, DType* out) {
   constexpr uint32_t head_dim = bdx * vec_size;
 
   uint32_t kv_chunk_idx = blockIdx.x;
   uint32_t kv_head_idx = blockIdx.y;
 
-  const uint32_t num_chunks = gridDim.x;
-  const uint32_t num_valid_pages = meta_data[0];
-  const uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
+  uint32_t num_chunks = gridDim.x;
+  uint32_t num_valid_pages = meta_data[0];
+  uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
 
   uint32_t qo_head_idx = kv_head_idx * bdy + threadIdx.y;
-  uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
+  uint32_t chunk_start = min(kv_chunk_idx * kv_chunk_size, num_valid_pages);
   uint32_t chunk_end = min(chunk_start + kv_chunk_size, num_valid_pages);
+  kv_chunk_size = max(chunk_end - chunk_start, 0);
+
+  // printf("num_chunks: %d\n", num_chunks);
+  // printf("num_valid_pages: %d\n", num_valid_pages);
+  // printf("kv_chunk_size: %d\n", kv_chunk_size);
+
   uint32_t kv_stride_h = head_dim;
   uint32_t kv_stride_n = num_kv_heads * head_dim;
 
@@ -222,7 +228,7 @@ cudaError_t Estimate(DType* q, DType* k, DType* out, uint32_t num_qo_heads, uint
       uint32_t num_chunks = max_grid_size / num_kv_heads;
       // uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
 
-      // no need to use partition-kv
+      // split-K
       dim3 nblks = dim3(num_chunks, num_kv_heads);
       dim3 nthrs = dim3(bdx, bdy, bdz);
 

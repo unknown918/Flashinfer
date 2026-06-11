@@ -14,14 +14,15 @@ def assert_close(a, b):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("page_size", [16, 32, 64])
 @pytest.mark.parametrize("num_kv_heads,num_qo_heads", [(8, 32)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
 def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
     head_dim = 128
     max_length = 32768
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:1")
+    torch.cuda.empty_cache()
 
     assert num_qo_heads % num_kv_heads == 0
     group_size = num_qo_heads // num_kv_heads
@@ -40,7 +41,7 @@ def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
         num_qo_heads, num_total_pages,
         dtype=dtype, device=device
     )
-    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    meta_data = torch.zeros(2, dtype=torch.uint32, device=device)
     meta_data[0] = num_valid_pages
 
     flashinfer.estimate(
@@ -55,4 +56,4 @@ def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
     ref = torch.einsum("hd,nhd->nh", query, pooling_).transpose(0, 1)
 
     assert out.shape == (num_qo_heads, num_total_pages)
-    assert_close(out[:, :num_valid_pages], ref[:])
+    assert_close(out[:, :num_valid_pages], ref[:, :])

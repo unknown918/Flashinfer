@@ -2,27 +2,32 @@ import pytest
 import torch
 import flashinfer
 
+torch.manual_seed(42)
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
+@pytest.mark.parametrize("page_size", [16, 32])
 @pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
-@pytest.mark.parametrize("page_size", [16, 32])  # fixme: page_size=64 has bug
-def test_topk_bool_mask_logits(seq_len, page_size):
-    torch.manual_seed(42)
-
-    device = torch.device("cuda:0")
+def test_topk_bool_mask_logits(seq_len, page_size, topk, dtype):
+    device = torch.device("cuda:1")
+    torch.cuda.empty_cache()
 
     num_kv_head = 8
     num_qo_head = 32
     group_size = num_qo_head // num_kv_head
-    k = 16
     max_length = 32768
 
+    if topk * page_size >= seq_len:
+        pytest.skip(f"invalid case: topk * page_size = {topk * page_size} >= {seq_len}")
+
     num_total_pages = max_length // page_size
-    num_valid_pages = (seq_len - 4 + page_size - 1) // page_size
-    last_page_len = (seq_len - 4) - (num_valid_pages - 1) * page_size
-    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
-    meta_data[0] = num_valid_pages
-    meta_data[1] = last_page_len
+    num_valid_pages = (seq_len - 4 + page_size - 1) // page_size - 1
+    last_page_len = (seq_len - 4) - num_valid_pages * page_size
+    meta_data_device = torch.zeros(2, dtype=torch.uint32, device=device)
+    meta_data_device[0] = num_valid_pages
+    meta_data_device[1] = last_page_len
     row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
 
     assert last_page_len > 0
@@ -30,9 +35,9 @@ def test_topk_bool_mask_logits(seq_len, page_size):
 
     logits = torch.randn(
         num_qo_head, num_total_pages,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         device=device
-    )
+    ) + 5e-7 * torch.arange(num_total_pages, device=device)
 
     def ref_expand():
         offsets = torch.arange(0, page_size, device=device)
@@ -41,11 +46,8 @@ def test_topk_bool_mask_logits(seq_len, page_size):
             seq_len - last_page_len, seq_len, device=device
         )
 
-        page_indices = torch.topk(
-            logits[:, :num_valid_pages - 1], k=k - 1
-        ).indices
-
-        page_indices = page_indices.view(num_kv_head, group_size, -1)
+        page_indices = torch.topk(logits[:, :num_valid_pages], k=topk - 1).indices
+        page_indices = page_indices.reshape(num_kv_head, group_size, -1)
 
         token_indices = None
         token_indptr = torch.zeros(
@@ -88,7 +90,7 @@ def test_topk_bool_mask_logits(seq_len, page_size):
     )
 
     indices = torch.zeros(
-        num_kv_head * (4 + k * group_size * page_size),
+        num_kv_head * (4 + topk * group_size * page_size),
         dtype=torch.uint32,
         device=device
     )
@@ -101,9 +103,9 @@ def test_topk_bool_mask_logits(seq_len, page_size):
     )
 
     _indptr, _indices = flashinfer.topk_bool_mask_logits(
-        top_k=k - 1,
+        top_k=topk - 1,
         page_size=page_size,
-        meta_data=meta_data,
+        meta_data=meta_data_device,
         logits=logits,
         indptr=indptr,
         indices=indices,
