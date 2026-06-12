@@ -467,14 +467,16 @@ def topk_bool_mask_logits(
         group_size: int,
         mask_logits: torch.Tensor,
         row_states_buffer: torch.Tensor,
+        is_bench: bool = False
 ):
-    r"""
-    uncomment this when profiling kernel performance,
-    in end-to-end inference, this overhead can be overlapped by using a alter stream
-    """
-    indptr.zero_()
-    indices.zero_()
-    mask_logits.zero_()
+    if is_bench:
+        r"""
+        clear this buffer before profiling kernel performance,
+        in end-to-end inference, this overhead can be overlapped by using a alter stream
+        """
+        indptr.zero_()
+        indices.zero_()
+        mask_logits.zero_()
 
     get_topk_module().radix_topk_mask_logits(
         logits,

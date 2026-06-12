@@ -141,7 +141,7 @@ class AttentionRunner:
             rope_theta=500000.0,
             low_freq_factor=1.0,
             high_freq_factor=4.0,
-            old_context_len=32768,
+            old_context_len=self.max_length,
         )
         return q, k
 

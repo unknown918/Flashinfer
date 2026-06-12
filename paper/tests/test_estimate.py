@@ -17,10 +17,10 @@ def assert_close(a, b):
 @pytest.mark.parametrize("page_size", [16, 32, 64])
 @pytest.mark.parametrize("num_kv_heads,num_qo_heads", [(8, 32)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760, 128000])
 def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
     head_dim = 128
-    max_length = 32768
+    max_length = 131072
     device = torch.device("cuda:1")
     torch.cuda.empty_cache()
 

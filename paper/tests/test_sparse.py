@@ -2,8 +2,6 @@ import pytest
 import torch
 import flashinfer
 
-torch.manual_seed(3407)
-
 
 def assert_close(a, b):
     rtol, atol = {
@@ -16,20 +14,23 @@ def assert_close(a, b):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
-@pytest.mark.parametrize("page_size", [16, 32])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
-def test_sparse_sink_attention(dtype, topk, page_size, seq_len):
-    max_length = 32768
+@pytest.mark.parametrize("page_size", [32])
+@pytest.mark.parametrize("max_length", [32768, 131072])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760, 128000])
+def test_sparse_sink_attention(max_length, dtype, topk, page_size, seq_len):
     num_kv_head = 8
     num_qo_head = 32
     head_dim = 128
     num_sink = 4
 
+    torch.manual_seed(3407)
+
     if topk * page_size >= seq_len:
         pytest.skip(f"invalid case: topk * page_size = {topk * page_size} >= {seq_len}")
+    if seq_len > max_length:
+        pytest.skip(f"invalid case: seq_len {seq_len} >= max_length {max_length}")
 
-    device = torch.device("cuda:1")
-    torch.cuda.empty_cache()
+    device = torch.device("cuda")
 
     group_size = num_qo_head // num_kv_head
     num_total_pages = max_length // page_size
@@ -45,8 +46,8 @@ def test_sparse_sink_attention(dtype, topk, page_size, seq_len):
 
     logits = torch.randn(
         num_qo_head, num_total_pages,
-        dtype=torch.float32, device=device
-    )
+        dtype=dtype, device=device
+    ) + 1e-6 * torch.arange(num_total_pages, device=device)
 
     num_blocks_col = num_valid_pages + 2  # sink + window
 

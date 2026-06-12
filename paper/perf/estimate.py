@@ -10,8 +10,8 @@ head_dim = 128
 page_size = 32
 num_kv_heads = 8
 num_qo_heads = 32
-seq_len = 8899
-max_length = 32768
+seq_len = 128000
+max_length = 131072
 dtype = torch.float16
 
 assert num_qo_heads % num_kv_heads == 0
@@ -31,7 +31,7 @@ out = torch.zeros(
     num_qo_heads, num_total_pages,
     dtype=dtype, device=device
 )
-meta_data = torch.zeros(3, dtype=torch.int32, device=device)
+meta_data = torch.zeros(2, dtype=torch.int32, device=device)
 meta_data[0] = num_valid_pages
 
 estimate_overhead = np.median(

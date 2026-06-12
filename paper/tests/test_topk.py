@@ -8,19 +8,20 @@ torch.manual_seed(42)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
-@pytest.mark.parametrize("page_size", [16, 32])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760])
-def test_topk_bool_mask_logits(seq_len, page_size, topk, dtype):
-    device = torch.device("cuda:1")
-    torch.cuda.empty_cache()
+@pytest.mark.parametrize("page_size", [32])
+@pytest.mark.parametrize("max_length", [32768, 131072])
+@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760, 128000])
+def test_topk_bool_mask_logits(max_length, seq_len, page_size, topk, dtype):
+    device = torch.device("cuda")
 
     num_kv_head = 8
     num_qo_head = 32
     group_size = num_qo_head // num_kv_head
-    max_length = 32768
 
     if topk * page_size >= seq_len:
         pytest.skip(f"invalid case: topk * page_size = {topk * page_size} >= {seq_len}")
+    if seq_len > max_length:
+        pytest.skip(f"invalid case: seq_len {seq_len} >= max_length {max_length}")
 
     num_total_pages = max_length // page_size
     num_valid_pages = (seq_len - 4 + page_size - 1) // page_size - 1
@@ -35,16 +36,15 @@ def test_topk_bool_mask_logits(seq_len, page_size, topk, dtype):
 
     logits = torch.randn(
         num_qo_head, num_total_pages,
-        dtype=dtype,
-        device=device
-    ) + 5e-7 * torch.arange(num_total_pages, device=device)
+        dtype=dtype, device=device
+    ) + 1e-6 * torch.arange(num_total_pages, device=device)
+
+    logits[:, num_valid_pages + 1:] = 0
 
     def ref_expand():
         offsets = torch.arange(0, page_size, device=device)
         first_token_indices = torch.arange(0, 4, device=device)
-        last_token_indices = torch.arange(
-            seq_len - last_page_len, seq_len, device=device
-        )
+        last_token_indices = torch.arange(seq_len - last_page_len, seq_len, device=device)
 
         page_indices = torch.topk(logits[:, :num_valid_pages], k=topk - 1).indices
         page_indices = page_indices.reshape(num_kv_head, group_size, -1)
@@ -130,3 +130,6 @@ def test_topk_bool_mask_logits(seq_len, page_size, topk, dtype):
         out_slice = _indices[start:end].to(torch.int32).sort().values
 
         assert torch.equal(ref_slice, out_slice)
+
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()

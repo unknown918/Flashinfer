@@ -16,7 +16,7 @@ def bench_sink_sparse_attention(
         num_kv_heads,
 ):
     sink = 4
-    max_length = 32768
+    max_length = 131072
     dtype = torch.half
 
     group_size = num_qo_heads // num_kv_heads
@@ -27,7 +27,7 @@ def bench_sink_sparse_attention(
     num_valid_pages = (seq_len - sink + page_size - 1) // page_size
     last_page_len = seq_len - sink - (num_valid_pages - 1) * page_size
     row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
-    meta_data = torch.zeros(3, dtype=torch.int32, device="cuda")
+    meta_data = torch.zeros(2, dtype=torch.int32, device="cuda")
     meta_data[0] = num_valid_pages
     meta_data[1] = last_page_len
 
@@ -90,6 +90,8 @@ def bench_sink_sparse_attention(
     )
 
     decode_wrapper.plan(
+        q_data_type=dtype,
+        kv_data_type=dtype,
         kv_indptr=indptr_buf.to(torch.int32),
         kv_indices=indices_buf.to(torch.int32),
         num_qo_heads=num_qo_heads,
@@ -149,7 +151,7 @@ if __name__ == "__main__":
     for num_qo_heads in [32]:
         for num_kv_heads in [8]:
             for head_dim in [128]:
-                for seq_len in [8192, 16384, 32000]:
+                for seq_len in [128000]:
                     for page_size in [32]:
                         for top_k in [16, 32, 64]:
                             bench_sink_sparse_attention(
