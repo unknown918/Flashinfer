@@ -11,6 +11,29 @@ def assert_close(a, b):
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
+def make_logits(
+        num_qo_head: int,
+        num_valid_pages: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        seed: int = 42,
+):
+    assert dtype in (torch.float16, torch.bfloat16), "only fp16/bf16 supported"
+
+    base = 0x3000 if dtype == torch.float16 else 0x3F00
+
+    bits = (torch.arange(num_valid_pages, device=device, dtype=torch.int32) + base).to(torch.int16)
+    logits = bits.view(dtype).unsqueeze(0).expand(num_qo_head, -1).clone()
+
+    g = torch.Generator(device=device)
+    g.manual_seed(seed)
+
+    perm = torch.randperm(num_valid_pages, device=device, generator=g)
+    logits = logits.index_select(1, perm)
+
+    return logits
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
@@ -30,7 +53,7 @@ def test_sparse_sink_attention(max_length, dtype, topk, page_size, seq_len):
     if seq_len > max_length:
         pytest.skip(f"invalid case: seq_len {seq_len} >= max_length {max_length}")
 
-    device = torch.device("cuda")
+    device = torch.device("cuda:2")
 
     group_size = num_qo_head // num_kv_head
     num_total_pages = max_length // page_size
@@ -44,10 +67,13 @@ def test_sparse_sink_attention(max_length, dtype, topk, page_size, seq_len):
     meta_data[0] = num_valid_pages
     meta_data[1] = last_page_len
 
-    logits = torch.randn(
+    logits = torch.zeros(
         num_qo_head, num_total_pages,
         dtype=dtype, device=device
-    ) + 1e-6 * torch.arange(num_total_pages, device=device)
+    )
+
+    logits_ = make_logits(num_qo_head, num_valid_pages, dtype, device, seed=42)
+    logits[:, :num_valid_pages] = logits_
 
     num_blocks_col = num_valid_pages + 2  # sink + window
 
@@ -138,6 +164,7 @@ def test_sparse_sink_attention(max_length, dtype, topk, page_size, seq_len):
         row_states_buffer=row_states_buffer
     )
 
+    indptr = indptr.to(torch.int32)
     indptr = indptr.cumsum(dim=-1)
 
     decode_workspace = torch.empty(

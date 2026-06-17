@@ -2,17 +2,58 @@ import pytest
 import torch
 import flashinfer
 
-torch.manual_seed(42)
 
+def make_logits(
+        num_qo_head: int,
+        num_valid_pages: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        seed: int = 42,
+):
+    assert dtype in (torch.float16, torch.bfloat16), "only fp16/bf16 supported"
+
+    base = 0x3000 if dtype == torch.float16 else 0x3F00
+
+    bits = (torch.arange(num_valid_pages, device=device, dtype=torch.int32) + base).to(torch.int16)
+    logits = bits.view(dtype).unsqueeze(0).expand(num_qo_head, -1).clone()
+
+    g = torch.Generator(device=device)
+    g.manual_seed(seed)
+
+    perm = torch.randperm(num_valid_pages, device=device, generator=g)
+    logits = logits.index_select(1, perm)
+
+    return logits
+
+boundaries = [
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    131062,
+]
+
+seq_lens = sorted({
+    boundary + delta
+    for boundary in boundaries
+    for delta in range(-8, 9)
+    if boundary + delta > 0
+})
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("topk", [8, 15, 16, 32, 60])
+@pytest.mark.parametrize("topk", [8, 15, 16, 32, 64])
 @pytest.mark.parametrize("page_size", [32])
 @pytest.mark.parametrize("max_length", [32768, 131072])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760, 128000])
+@pytest.mark.parametrize("seq_len", seq_lens)
 def test_topk_bool_mask_logits(max_length, seq_len, page_size, topk, dtype):
-    device = torch.device("cuda")
+    device = torch.device("cuda:2")
+
+    l2_flush_size = int(256) * 1024 * 1024
+    buffer = torch.empty(l2_flush_size, device=device, dtype=torch.int8)
+    buffer.zero_()
 
     num_kv_head = 8
     num_qo_head = 32
@@ -34,12 +75,13 @@ def test_topk_bool_mask_logits(max_length, seq_len, page_size, topk, dtype):
     assert last_page_len > 0
     assert num_valid_pages > 0
 
-    logits = torch.randn(
+    logits = torch.zeros(
         num_qo_head, num_total_pages,
         dtype=dtype, device=device
-    ) + 1e-6 * torch.arange(num_total_pages, device=device)
+    )
 
-    logits[:, num_valid_pages + 1:] = 0
+    logits_ = make_logits(num_qo_head, num_valid_pages, dtype, device, seed=42)
+    logits[:, :num_valid_pages] = logits_
 
     def ref_expand():
         offsets = torch.arange(0, page_size, device=device)
@@ -102,7 +144,7 @@ def test_topk_bool_mask_logits(max_length, seq_len, page_size, topk, dtype):
         device=device
     )
 
-    _indptr, _indices = flashinfer.topk_bool_mask_logits(
+    flashinfer.topk_bool_mask_logits(
         top_k=topk - 1,
         page_size=page_size,
         meta_data=meta_data_device,
@@ -114,22 +156,21 @@ def test_topk_bool_mask_logits(max_length, seq_len, page_size, topk, dtype):
         row_states_buffer=row_states_buffer
     )
 
-    _indptr = _indptr.to(torch.int32)
+    indptr = indptr.to(torch.int32)
 
     ref_indptr, ref_indices = ref_expand()
 
-    assert torch.equal(ref_indptr, _indptr)
+    assert torch.equal(ref_indptr, indptr)
 
-    _indptr = _indptr.cumsum(dim=-1)
+    indptr = indptr.cumsum(dim=-1)
 
     for i in range(num_kv_head):
-        start = _indptr[i]
-        end = _indptr[i + 1]
+        start = indptr[i]
+        end = indptr[i + 1]
 
         ref_slice = ref_indices[start:end].sort().values
-        out_slice = _indices[start:end].to(torch.int32).sort().values
+        out_slice = indices[start:end].to(torch.int32).sort().values
 
         assert torch.equal(ref_slice, out_slice)
 
     torch.cuda.empty_cache()
-    torch.cuda.synchronize()

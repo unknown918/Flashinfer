@@ -52,8 +52,8 @@ FLASHINFER_BASE_DIR: pathlib.Path = pathlib.Path(
     os.getenv("FLASHINFER_WORKSPACE_BASE", pathlib.Path.home().as_posix())
 )
 
+FLASHINFER_CACHE_DIR: pathlib.Path = FLASHINFER_BASE_DIR / ".cache" / "flashinfer"
 _package_root: pathlib.Path = pathlib.Path(__file__).resolve().parents[1]
-FLASHINFER_CACHE_DIR: pathlib.Path = _package_root / ".cache"
 
 
 def _get_cubin_dir():

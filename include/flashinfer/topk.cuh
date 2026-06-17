@@ -1077,9 +1077,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
     DType pivot = Traits::NegInf();
 
     if (k >= num_valid_pages) {  // bool masking is all true
-      const uint32_t aligned_size = (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
+      // const uint32_t aligned_size = (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
 #pragma unroll
-      for (uint32_t i = aligned_size + tx; i < actual_chunk_size; i += BLOCK_THREADS) {
+      for (uint32_t i = tx; i < actual_chunk_size; i += BLOCK_THREADS) {
         mask_logits[row_idx / group_size * row_size + chunk_start + i] = 1U;
       }
       continue;
@@ -1167,24 +1167,24 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
       tmp_idx = __shfl_sync(0xFFFFFFFF, page_idx, src_lane);
       start_pos = __shfl_sync(0xFFFFFFFF, start_pos, src_lane);
       // kv layout: (num_pages, page_size, num_kv_heads)
-      for (uint32_t i = 0; i < ceil_div(page_size, 32); i++) {
-        token_idx = (lane_id + i * 32) % page_size;
-        indices[start_pos + token_idx] = (4 + tmp_idx * page_size + token_idx) * batch_size + row_idx;
-      }
-      // indices[start_pos + lane_id] = (4 + tmp_idx * page_size + lane_id) * batch_size + row_idx;
+      indices[start_pos + lane_id] = (4 + tmp_idx * page_size + lane_id) * batch_size + row_idx;
       ballot_mask &= ballot_mask - 1;
       count++;
     }
     row_end = (row_start + indptr[row_idx + 1]) * page_size + (row_idx + 1) * (4 + last_page_len);
-    if (page_idx == 0) indptr[row_idx + 1] = indptr[row_idx + 1] * page_size + 4 + last_page_len;
-    if (page_idx < 4) {
-      row_start = row_start * page_size + row_idx * (4 + last_page_len);
-      indices[row_start + page_idx] = page_idx * batch_size + row_idx;
-    }
-    if (page_idx < last_page_len)
-      indices[row_end - last_page_len + page_idx] =
-          (4 + num_valid_pages * page_size + page_idx) * batch_size + row_idx;
   }
+
+  grid.sync();
+
+  if (row_idx < batch_size && page_idx == 0)
+    indptr[row_idx + 1] = indptr[row_idx + 1] * page_size + 4 + last_page_len;
+  if (row_idx < batch_size && page_idx < 4) {
+    row_start = row_start * page_size + row_idx * (4 + last_page_len);
+    indices[row_start + page_idx] = page_idx * batch_size + row_idx;
+  }
+  if (row_idx < batch_size && page_idx < last_page_len)
+    indices[row_end - last_page_len + page_idx] = (4 + num_valid_pages * page_size + page_idx) * batch_size + row_idx;
+
   // Clear histogram buffers and reset arrival counter for next kernel launch (only for multi-CTA)
   if constexpr (!SINGLE_CTA) {
     // Only leading CTA clears the buffers using release semantics
@@ -1246,7 +1246,7 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   // chunk_size = round_up(chunk_size, vec_size);
   // chunk_size = std::min(chunk_size, max_chunk_elements);
 
-  uint32_t ctas_per_group = 1;
+  const uint32_t ctas_per_group = 1;
   const uint32_t smem_size = fixed_smem_aligned + row_size * sizeof(OrderedType);
   const bool single_cta = (ctas_per_group == 1);
 
@@ -1258,7 +1258,8 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
     if (single_cta) {
       auto kernel = RadixTopKBoolMaskKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, true, DType, IdType>;
-      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      FLASHINFER_CUDA_CALL(
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);
@@ -1270,7 +1271,8 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
           cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
     } else {
       auto kernel = RadixTopKBoolMaskKernel_MultiCTA<BLOCK_THREADS, VEC_SIZE, false, DType, IdType>;
-      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      FLASHINFER_CUDA_CALL(
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
       dim3 nblks(total_ctas);
       dim3 nthrs(BLOCK_THREADS);

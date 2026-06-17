@@ -12,12 +12,28 @@ def assert_close(a, b):
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
+boundaries = [
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    131062,
+]
+
+seq_lens = sorted({
+    boundary + delta
+    for boundary in boundaries
+    for delta in range(-8, 9)
+    if boundary + delta > 0
+})
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("page_size", [16, 32, 64])
 @pytest.mark.parametrize("num_kv_heads,num_qo_heads", [(8, 32)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("seq_len", [1021, 1022, 1023, 1024, 3351, 8192, 16384, 32760, 128000])
+@pytest.mark.parametrize("seq_len", seq_lens)
 def test_decode_estimate(dtype, seq_len, num_kv_heads, num_qo_heads, page_size):
     head_dim = 128
     max_length = 131072
