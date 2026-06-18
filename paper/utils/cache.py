@@ -11,7 +11,7 @@ class PagedKVCache:
             num_kv_heads: int,
             max_length: int,
             sink: int = 4,
-            page_size: int = 32,  # must greater than 16
+            page_size: int = 32,
             device: torch.device = "cuda:0",
             dtype: torch.dtype = torch.float16
     ):

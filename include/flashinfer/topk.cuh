@@ -1246,7 +1246,7 @@ cudaError_t RadixTopKMaskLogitsMultiCTA(DType* logits, IdType* mask_logits, IdTy
   // chunk_size = round_up(chunk_size, vec_size);
   // chunk_size = std::min(chunk_size, max_chunk_elements);
 
-  const uint32_t ctas_per_group = 1;
+  uint32_t ctas_per_group = 1;
   const uint32_t smem_size = fixed_smem_aligned + row_size * sizeof(OrderedType);
   const bool single_cta = (ctas_per_group == 1);
 

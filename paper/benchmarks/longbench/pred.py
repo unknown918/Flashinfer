@@ -1,7 +1,6 @@
 import os
 import torch
 import json
-import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 import numpy as np
@@ -34,7 +33,6 @@ def build_chat(tokenizer, prompt, model_name):
 
 def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
     for json_obj in tqdm(data):
-        model.ss_flush()
         prompt = prompt_format.format(**json_obj)
 
         # truncate to fit max_length
@@ -86,47 +84,36 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
 
 seed_everything(42)
 
-model2maxlen = json.load(open("config/model2maxlen.json", "r"))
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_name = "Llama-3.1-8B-Instruct"
-
-# define your model
-max_length = model2maxlen[model_name]
-# repobench-p, gov_report, triviaqa has bug
 datasets = [
     "qasper", "multifieldqa_en",  # Single-Doc QA
     "hotpotqa", "2wikimqa", "musique",  # Multi-Doc QA
-    "gov_report", # has problem
-    # "qmsum", "multi_news",  # Summarization
-    # "triviaqa",  # Few-shot
-    # "passage_retrieval_en",  # Synthetic
-    # "lcc", "repobench-p"  # Code
+    "gov_report",  # has problem
+    "qmsum", "multi_news",  # Summarization
+    "triviaqa",  # Few-shot
+    "passage_retrieval_en",  # Synthetic
+    "lcc", "repobench-p"  # Code
 ]
 
+model2maxlen = json.load(open("config/model2maxlen.json", "r"))
 dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
 dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
+
+# conifgs
+device = "cuda:0"
+model_name = "Llama-3.1-8B-Instruct"
+max_length = model2maxlen[model_name]
 
 # predict on each dataset
 os.makedirs("pred", exist_ok=True)
 os.makedirs(f"pred/{model_name}", exist_ok=True)
 
-# patch llama
-from paper.models.llama import LlamaForCausalLM
-
-transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
-
 tokenizer = AutoTokenizer.from_pretrained(f"./{model_name}", )
 model = AutoModelForCausalLM.from_pretrained(
     f"./{model_name}",
-    torch_dtype=torch.float16
-).to("cuda:0")
-model.ss_init(
-    device="cuda:0",
-    budget=256,
-    page_size=32,
-    max_length=32768,
-    dtype=torch.float16,
-)
+    torch_dtype=torch.float16,
+    trust_remote_code=True,
+    attn_implementation="flash_attention_2"
+).to(device)
 
 for dataset in datasets:
     data = []
@@ -146,5 +133,3 @@ for dataset in datasets:
         dataset=dataset,
         out_path=out_path
     )
-
-model.ss_flush()
