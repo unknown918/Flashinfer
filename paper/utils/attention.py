@@ -18,6 +18,7 @@ class AttentionRunner:
             dtype: torch.dtype = torch.float16,
             device: str = "cuda:0"
     ):
+        self.dtype = dtype
         self.device = torch.device(device)
 
         self.sink = sink
@@ -101,6 +102,8 @@ class AttentionRunner:
             device=self.device
         )
         self.decode_wrapper.plan(
+            q_data_type=self.dtype,
+            kv_data_type=self.dtype,
             kv_indptr=proxy_indptr,
             kv_indices=proxy_indices,
             num_qo_heads=self.cache_manager.num_qo_heads,
@@ -155,7 +158,8 @@ class AttentionRunner:
             k=k,
             v=v,
             causal=True,
-            return_lse=False
+            return_lse=False,
+            o_dtype=self.dtype
         )
 
     def decode(
