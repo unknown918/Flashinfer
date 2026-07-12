@@ -40,19 +40,12 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
             torch.cuda.synchronize()
 
             prompt = prompt_format.format(**json_obj)
-            if model_name == "Qwen3-8B":
-                tokenized_prompt = tokenizer.apply_chat_template(
-                    prompt,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    # enable_thinking=False
-                ).to(device)
-            else:
-                tokenized_prompt = tokenizer(
-                    prompt,
-                    truncation=False,
-                    return_tensors="pt"
-                ).input_ids[0]
+
+            tokenized_prompt = tokenizer(
+                prompt,
+                truncation=False,
+                return_tensors="pt"
+            ).input_ids[0]
 
             if len(tokenized_prompt) > max_length:
                 half = int(max_length / 2)
@@ -64,19 +57,11 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
             if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
                 prompt = build_chat(tokenizer, prompt, model_name)
 
-            if model_name == "Qwen3-8B":
-                input = tokenizer.apply_chat_template(
-                    prompt,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    # enable_thinking=False
-                ).to(device)
-            else:
-                input = tokenizer(
-                    prompt,
-                    truncation=False,
-                    return_tensors="pt"
-                ).input_ids[0]
+            input = tokenizer(
+                prompt,
+                truncation=False,
+                return_tensors="pt"
+            ).input_ids[0]
 
             # input = tokenizer(prompt, truncation=False, return_tensors="pt").to(device)
             context_length = input.input_ids.shape[-1]
@@ -102,10 +87,6 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
                     do_sample=False,
                     temperature=0,
                 )[0]
-
-            if model_name == "Qwen3-8B":
-                index = output.tolist().index(151668)
-                output = output[index + 1:]
 
             pred = tokenizer.decode(
                 output,

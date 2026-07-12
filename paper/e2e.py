@@ -29,7 +29,7 @@ device = "cuda"
 tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 model = AutoModelForCausalLM.from_pretrained(
     args.model_id,
-    torch_dtype=torch.float16,
+    torch_dtype=torch.bfloat16,
     trust_remote_code=True
 ).to(device)
 
@@ -60,7 +60,7 @@ with torch.inference_mode():
         budget=args.budget,
         page_size=args.page_size,
         max_length=args.max_length,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
 
     # warmup (cuda graph capture)
@@ -113,7 +113,7 @@ response = tokenizer.decode(new_tokens, skip_special_tokens=True)
 print("\n===== OUTPUT =====\n")
 print(response)
 
-print("\n===== STATS =====")
+print("\n===== STATS =====\n")
 print(f"Seq Len     : {args.seq_len}")
 print(f"Budget      : {args.budget}")
 print(f"TTFT        : {ttft * 1e3:.3f} ms")

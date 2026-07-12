@@ -20,7 +20,7 @@ device = "cuda:0"
 tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 model = AutoModelForCausalLM.from_pretrained(
     args.model_id,
-    torch_dtype=torch.float16,
+    torch_dtype=torch.bfloat16,
     trust_remote_code=True,
     attn_implementation="flash_attention_2"
 ).to(device)

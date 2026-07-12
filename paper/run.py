@@ -30,7 +30,7 @@ if args.is_sparse:
     transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True
     ).to(device)
     input_ids = tokenizer.apply_chat_template(
@@ -59,7 +59,7 @@ if args.is_sparse:
 else:
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2"
     ).to(device)
