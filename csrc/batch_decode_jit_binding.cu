@@ -32,6 +32,7 @@ void BatchDecodeWithPagedKVCacheRun(TensorView float_workspace_buffer,
                                     TensorView q, TensorView paged_k_cache,
                                     TensorView paged_v_cache, TensorView paged_kv_indptr,
                                     TensorView paged_kv_indices, TensorView paged_kv_last_page_len,
+                                    TensorView sink_k, TensorView sink_v,
                                     TensorView o, Optional<TensorView> maybe_lse,
                                     int64_t kv_layout_code, int64_t window_left,
                                     bool enable_pdl ADDITIONAL_FUNC_PARAMS);

@@ -82,29 +82,24 @@ __device__ __forceinline__ void compute_qk(const DType* smem, const vec_t<float,
 
 template <typename DType, uint32_t num_stages_smem, uint32_t tile_size_per_bdx, uint32_t vec_size,
           uint32_t bdx, uint32_t bdy, uint32_t bdz>
-__global__ void EstimationKernel(DType* __restrict__ q, DType* __restrict__ k,
-                                 uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                 uint32_t* meta_data, uint32_t num_total_pages, DType* out) {
-  constexpr uint32_t head_dim = bdx * vec_size;
-
-  uint32_t kv_chunk_idx = blockIdx.x;
+__global__ void EstimationKernel(DType* __restrict__ query, DType* __restrict__ pooling,
+                                 uint32_t batch_size, uint32_t num_qo_heads, uint32_t num_kv_heads,
+                                 uint32_t max_num_pages, const uint32_t* kv_indptr,
+                                 const uint32_t* kv_indices, DType* out) {
+  uint32_t head_dim = bdx * vec_size;
+  uint32_t kv_stride_h = head_dim;
+  uint32_t kv_stride_n = num_kv_heads * head_dim;
+  uint32_t batch_idx = blockIdx.x;
   uint32_t kv_head_idx = blockIdx.y;
-
-  uint32_t num_chunks = gridDim.x;
-  uint32_t num_valid_pages = meta_data[0];
-  uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
-
+  uint32_t num_pages = kv_indptr[batch_idx + 1] - kv_indptr[batch_idx];
   uint32_t qo_head_idx = kv_head_idx * bdy + threadIdx.y;
-  uint32_t chunk_start = min(kv_chunk_idx * kv_chunk_size, num_valid_pages);
-  uint32_t chunk_end = min(chunk_start + kv_chunk_size, num_valid_pages);
-  kv_chunk_size = max(chunk_end - chunk_start, 0);
+  // uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
+  // uint32_t chunk_end = min(chunk_start + kv_chunk_size, num_pages);
+  // kv_chunk_size = chunk_end - chunk_start;
 
   // printf("num_chunks: %d\n", num_chunks);
   // printf("num_valid_pages: %d\n", num_valid_pages);
   // printf("kv_chunk_size: %d\n", kv_chunk_size);
-
-  uint32_t kv_stride_h = head_dim;
-  uint32_t kv_stride_n = num_kv_heads * head_dim;
 
   extern __shared__ uint8_t smem[];
 
@@ -112,47 +107,43 @@ __global__ void EstimationKernel(DType* __restrict__ q, DType* __restrict__ k,
 
   uint32_t tx = threadIdx.x, ty = threadIdx.y, tz = threadIdx.z;
   vec_t<float, vec_size> q_vec;
-  q_vec.cast_load(q + qo_head_idx * head_dim + tx * vec_size);
+  q_vec.cast_load(query + (batch_idx * num_qo_heads + qo_head_idx) * head_dim + tx * vec_size);
   __syncthreads();
 
   // preload k tiles
-  uint32_t producer_kv_idx_base = chunk_start;
+  uint32_t producer_kv_idx_base = 0;
   constexpr uint32_t vec_bits = sizeof(DType) * vec_size * 8;
 #pragma unroll
   for (uint32_t iter = 0; iter < num_stages_smem; ++iter) {
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
       cp_async::pred_load<vec_bits, PrefetchMode::kPrefetch, SharedMemFillMode::kNoFill>(
-          k_smem + (((iter * bdz + tz) * bdy + ty) * tile_size_per_bdx + j) * head_dim +
-              tx * vec_size,
-          k + (producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j) * kv_stride_n +
-              kv_head_idx * kv_stride_h + tx * vec_size,
-          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < chunk_end);
+          k_smem + (((iter * bdz + tz) * bdy + ty) * tile_size_per_bdx + j) * head_dim + tx * vec_size,
+          pooling + kv_indices[kv_indptr[batch_idx] + producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j] * kv_stride_n + kv_head_idx * kv_stride_h + tx * vec_size,
+          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < num_pages);
     }
     cp_async::commit_group();
     producer_kv_idx_base += bdy * bdz * tile_size_per_bdx;
   }
 
   // pipelining k/v tiles loading and state updating
-  uint32_t consumer_kv_idx_base = chunk_start, stage_idx = 0;
+  uint32_t consumer_kv_idx_base = 0, stage_idx = 0;
 
 #pragma unroll 2
-  for (uint32_t iter = 0; iter < ceil_div(kv_chunk_size, tile_size_per_bdx * bdy * bdz); ++iter) {
+  for (uint32_t iter = 0; iter < ceil_div(num_pages, tile_size_per_bdx * bdy * bdz); ++iter) {
     // compute qk
     cp_async::wait_group<num_stages_smem - 1>();
     __syncthreads();
     compute_qk<vec_size, bdx, bdy * tile_size_per_bdx, DType>(
         k_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, q_vec,
-        consumer_kv_idx_base, iter * bdy * tile_size_per_bdx * bdz, kv_chunk_size,
-        out + num_total_pages * qo_head_idx, tx, ty, tz);
+        consumer_kv_idx_base, iter * bdy * tile_size_per_bdx * bdz, num_pages,
+        out + (batch_idx * num_qo_heads + qo_head_idx) * max_num_pages, tx, ty, tz);
     __syncthreads();
     // load k
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
       cp_async::pred_load<vec_bits, PrefetchMode::kPrefetch, SharedMemFillMode::kNoFill>(
-          k_smem + (((stage_idx * bdz + tz) * bdy + ty) * tile_size_per_bdx + j) * head_dim +
-              tx * vec_size,
-          k + (producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j) * kv_stride_n +
-              kv_head_idx * kv_stride_h + tx * vec_size,
-          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < chunk_end);
+          k_smem + (((stage_idx * bdz + tz) * bdy + ty) * tile_size_per_bdx + j) * head_dim + tx * vec_size,
+          pooling + kv_indices[kv_indptr[batch_idx] + producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j] * kv_stride_n + kv_head_idx * kv_stride_h + tx * vec_size,
+          producer_kv_idx_base + (tz * bdy + ty) * tile_size_per_bdx + j < num_pages);
     }
     cp_async::commit_group();
 
@@ -185,8 +176,8 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
  * \brief Calculate the estimated attention scores
  * \tparam HEAD_DIM A integer indicates the head dimension
  * \tparam DType A template type indicates the data type
- * \param q The query matrix, shape: [num_qo_heads, head_dim]
- * \param k The key matrix in kv-cache, shape: [num_total_pages, num_kv_heads, head_dim]
+ * \param query The query matrix, shape: [num_qo_heads, head_dim]
+ * \param pooling The key matrix in kv-cache, shape: [num_total_pages, num_kv_heads, head_dim]
  * \param out The estimation result, shape: [num_total_pages, num_kv_heads, head_dim]
  * \param num_qo_heads A integer indicates the number of heads of query and output
  * \param num_kv_heads A integer indicates the number of heads of key and value
@@ -196,8 +187,9 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
  * \return status Indicates whether CUDA calls are successful
  */
 template <uint32_t HEAD_DIM, typename DType>
-cudaError_t Estimate(DType* q, DType* k, DType* out, uint32_t num_qo_heads, uint32_t num_kv_heads,
-                     uint32_t* meta_data, uint32_t num_total_pages, cudaStream_t stream) {
+cudaError_t Estimate(DType* query, DType* pooling, uint32_t batch_size, uint32_t num_qo_heads,
+                     uint32_t num_kv_heads, uint32_t max_num_pages, uint32_t* kv_indptr,
+                     uint32_t* kv_indices, DType* out, cudaStream_t stream) {
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DType), HEAD_DIM / 32UL);
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   auto compute_capacity = GetCudaComputeCapability();
@@ -211,34 +203,27 @@ cudaError_t Estimate(DType* q, DType* k, DType* out, uint32_t num_qo_heads, uint
     DISPATCH_COMPUTE_CAP_DECODE_NUM_STAGES_SMEM(compute_capacity, NUM_STAGES_SMEM, {
       const uint32_t smem_size =
           NUM_STAGES_SMEM * bdy * tile_size_per_bdx * bdz * HEAD_DIM * sizeof(DType);
-      auto kernel =
-          EstimationKernel<DType, NUM_STAGES_SMEM, tile_size_per_bdx, vec_size, bdx, bdy, bdz>;
-      FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+      auto kernel = EstimationKernel<DType, NUM_STAGES_SMEM, tile_size_per_bdx, vec_size, bdx, bdy, bdz>;
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
-      int num_blocks_per_sm = 0;
-      int num_sm = 0;
-      int dev_id = 0;
-      FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
-      FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
-      FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
-                                                                         num_threads, smem_size));
-
-      uint32_t max_grid_size = uint32_t(num_blocks_per_sm) * uint32_t(num_sm);
-      uint32_t num_chunks = max_grid_size / num_kv_heads;
-      // uint32_t kv_chunk_size = ceil_div(num_valid_pages, num_chunks);
+      // int num_blocks_per_sm = 0;
+      // int num_sm = 0;
+      // int dev_id = 0;
+      // FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+      // FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
+      // FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel, num_threads, smem_size));
+      //
+      // uint32_t max_grid_size = uint32_t(num_blocks_per_sm) * uint32_t(num_sm);
+      // uint32_t num_chunks = max_grid_size / num_kv_heads;
+      // uint32_t kv_chunk_size = ceil_div(total_len, num_chunks - batch_size);
 
       // split-K
-      dim3 nblks = dim3(num_chunks, num_kv_heads);
+      dim3 nblks = dim3(batch_size, num_kv_heads);
       dim3 nthrs = dim3(bdx, bdy, bdz);
 
-      void* args[] = {(void*)&q,
-                      (void*)&k,
-                      (void*)&num_qo_heads,
-                      (void*)&num_kv_heads,
-                      (void*)&meta_data,
-                      (void*)&num_total_pages,
-                      (void*)&out};
+      void* args[] = {(void*)&query,        (void*)&pooling,      (void*)&batch_size,
+                      (void*)&num_qo_heads, (void*)&num_kv_heads, (void*)&max_num_pages,
+                      (void*)&kv_indptr,    (void*)&kv_indices,   (void*)&out};
       FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
       return cudaSuccess;
     });

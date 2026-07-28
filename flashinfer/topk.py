@@ -138,11 +138,11 @@ def get_topk_module():
             mask_logits: torch.Tensor,
             indptr: torch.Tensor,
             indices: torch.Tensor,
-            row_states_buffer: Optional[torch.Tensor],
+            sparse_indptr: torch.Tensor,
+            sparse_indices: torch.Tensor,
             top_k: int,
-            meta_data: torch.Tensor,
+            num_pages_per_req: torch.Tensor,
             group_size: int,
-            page_size: int,
     ) -> None:
         # Supports float32, float16, bfloat16
         assert logits.dtype in [torch.float32, torch.float16, torch.bfloat16], (
@@ -150,10 +150,15 @@ def get_topk_module():
         )
 
         module.radix_topk_mask_logits(
-            logits, mask_logits,
-            indptr, indices,
-            row_states_buffer,
-            top_k, meta_data, group_size, page_size
+            logits,
+            mask_logits,
+            indptr,
+            indices,
+            sparse_indptr,
+            sparse_indices,
+            top_k,
+            num_pages_per_req,
+            group_size
         )
 
     @register_fake_op("flashinfer::radix_topk_mask_logits")
@@ -162,11 +167,11 @@ def get_topk_module():
             mask_logits: torch.Tensor,
             indptr: torch.Tensor,
             indices: torch.Tensor,
-            row_states_buffer: Optional[torch.Tensor],
+            sparse_indptr: torch.Tensor,
+            sparse_indices: torch.Tensor,
             top_k: int,
-            meta_data: torch.Tensor,
+            num_pages_per_req: torch.Tensor,
             group_size: int,
-            page_size: int,
     ) -> torch.Tensor:
         pass
 
@@ -458,15 +463,15 @@ def top_k_ragged_transform(
 
 
 def topk_bool_mask_logits(
-        top_k: int,
-        page_size: int,
-        meta_data: torch.Tensor,
         logits: torch.Tensor,
+        mask_logits: torch.Tensor,
         indptr: torch.Tensor,
         indices: torch.Tensor,
+        sparse_indptr: torch.Tensor,
+        sparse_indices: torch.Tensor,
+        top_k: int,
         group_size: int,
-        mask_logits: torch.Tensor,
-        row_states_buffer: torch.Tensor,
+        num_pages_per_req: torch.Tensor,
         is_bench: bool = False
 ):
     if is_bench:
@@ -474,15 +479,20 @@ def topk_bool_mask_logits(
         clear this buffer before profiling kernel performance,
         in end-to-end inference, this overhead can be overlapped by using a alter stream
         """
-        indptr.zero_()
-        indices.zero_()
+        sparse_indptr.zero_()
+        sparse_indices.zero_()
         mask_logits.zero_()
 
     get_topk_module().radix_topk_mask_logits(
         logits,
-        mask_logits, indptr, indices,
-        row_states_buffer,
-        top_k, meta_data, group_size, page_size
+        mask_logits,
+        indptr,
+        indices,
+        sparse_indptr,
+        sparse_indices,
+        top_k,
+        num_pages_per_req,
+        group_size,
     )
 
-    return indptr, indices
+    return sparse_indptr, sparse_indices

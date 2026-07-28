@@ -40,15 +40,25 @@ struct paged_kv_t {
   uint32_t num_heads;
   uint32_t head_dim;
   uint32_t batch_size;
+  uint32_t sink_size;
   uint32_t stride_page;
   uint32_t stride_n;
   uint32_t stride_h;
+  uint32_t stride_sink;
+  uint32_t stride_sink_n;
+  uint32_t stride_sink_h;
+  uint32_t stride_pool;
 
   // Internal layout:
   // [max_num_pages, num_heads, page_size, head_dim] if layout == HND
   // [max_num_pages, page_size, num_heads, head_dim] if layout == NHD
   DType* k_data;
   DType* v_data;
+  // [max_num_batches, num_heads, sink_size, head_dim] if layout == HND
+  // [max_num_batches, sink_size, num_heads, head_dim] if layout == NHD
+  DType* sink_k_data;
+  DType* sink_v_data;
+  DType* pool_data; // [max_num_pages, num_heads, head_dim]
   IdType* indices;
 
   // [batch_size + 1] The page indptr array, with the first element 0, the last element nnz_pages
@@ -66,11 +76,18 @@ struct paged_kv_t {
         page_size(),
         head_dim(0),
         batch_size(0),
+        sink_size(0),
         stride_page(0),
         stride_n(0),
         stride_h(0),
+        stride_pool(0),
+        stride_sink(0),
+        stride_sink_n(0),
+        stride_sink_h(0),
         k_data(nullptr),
         v_data(nullptr),
+        sink_k_data(nullptr),
+        sink_v_data(nullptr),
         indices(nullptr),
         indptr(nullptr),
         last_page_len(nullptr),
@@ -91,22 +108,32 @@ struct paged_kv_t {
    * \param rope_pos_offset The start position of each request in the batch.
    */
   __host__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size, uint32_t head_dim,
-                                      uint32_t batch_size, QKVLayout layout, DType* k_data,
-                                      DType* v_data, IdType* indices, IdType* indptr,
-                                      IdType* last_page_len, IdType* rope_pos_offset = nullptr)
+                                      uint32_t batch_size, uint32_t sink_size, QKVLayout layout,
+                                      DType* k_data, DType* v_data, DType* sink_k_data,
+                                      DType* sink_v_data, DType* pool_data, IdType* indices,
+                                      IdType* indptr, IdType* last_page_len,
+                                      IdType* rope_pos_offset = nullptr)
       : num_heads(num_heads),
         page_size(page_size),
         head_dim(head_dim),
         batch_size(batch_size),
+        sink_size(sink_size),
         indices(indices),
         indptr(indptr),
         last_page_len(last_page_len),
         rope_pos_offset(rope_pos_offset) {
+    stride_pool = num_heads * head_dim;
     stride_page = num_heads * page_size * head_dim;
+    stride_sink = num_heads * this->sink_size * head_dim;
     this->k_data = k_data;
     this->v_data = v_data;
+    this->sink_k_data = sink_k_data;
+    this->sink_v_data = sink_v_data;
+    this->pool_data = pool_data;
     stride_n = layout == QKVLayout::kHND ? head_dim : num_heads * head_dim;
     stride_h = layout == QKVLayout::kHND ? page_size * head_dim : head_dim;
+    stride_sink_n = layout == QKVLayout::kHND ? head_dim : num_heads * head_dim;
+    stride_sink_h = layout == QKVLayout::kHND ? sink_size * head_dim : head_dim;
   }
 
   /*!
@@ -125,23 +152,33 @@ struct paged_kv_t {
    * \param rope_pos_offset The start position of each request in the batch.
    */
   __host__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size, uint32_t head_dim,
-                                      uint32_t batch_size, QKVLayout layout, DType* k_data,
-                                      DType* v_data, const int64_t* kv_strides, IdType* indices,
-                                      IdType* indptr, IdType* last_page_len,
+                                      uint32_t batch_size, uint32_t sink_size, QKVLayout layout,
+                                      DType* k_data, DType* v_data, DType* sink_k_data,
+                                      DType* sink_v_data, DType* pool_data,
+                                      const int64_t* kv_strides, const int64_t* sink_strides,
+                                      IdType* indices, IdType* indptr, IdType* last_page_len,
                                       IdType* rope_pos_offset = nullptr)
       : num_heads(num_heads),
         page_size(page_size),
         head_dim(head_dim),
         batch_size(batch_size),
+        sink_size(sink_size),
         indices(indices),
         indptr(indptr),
         last_page_len(last_page_len),
         rope_pos_offset(rope_pos_offset) {
+    stride_pool = num_heads * head_dim;
     stride_page = kv_strides[0];
+    stride_sink = sink_strides[0];
     this->k_data = k_data;
     this->v_data = v_data;
+    this->sink_k_data = sink_k_data;
+    this->sink_v_data = sink_v_data;
+    this->pool_data = pool_data;
     stride_n = layout == QKVLayout::kHND ? kv_strides[2] : kv_strides[1];
     stride_h = layout == QKVLayout::kHND ? kv_strides[1] : kv_strides[2];
+    stride_sink_n = layout == QKVLayout::kHND ? sink_strides[2] : sink_strides[1];
+    stride_sink_h = layout == QKVLayout::kHND ? sink_strides[1] : sink_strides[2];
   }
 
   __host__ __device__ __forceinline__ uint32_t get_length(uint32_t batch_idx) const {
@@ -164,6 +201,11 @@ struct paged_kv_t {
     return page_idx * stride_page + head_idx * stride_h + entry_idx * stride_n + feat_idx;
   }
 
+  __host__ __device__ __forceinline__ size_t get_pool_offset(size_t page_idx, size_t head_idx,
+                                                             size_t feat_idx) const {
+    return page_idx * num_heads * head_dim + head_idx * head_dim + feat_idx;
+  }
+
   /*!
    * \brief Compute the offset of element inside the page.
    * \param head_idx The head index
@@ -176,11 +218,6 @@ struct paged_kv_t {
     return head_idx * stride_h + entry_idx * stride_n + feat_idx;
   }
 
-  __device__ __forceinline__ DType* get_k_ptr(IdType page_iter, uint32_t head_idx,
-                                              uint32_t entry_idx, uint32_t feat_idx) const {
-    return k_data + get_elem_offset(__ldg(indices + page_iter), head_idx, entry_idx, feat_idx);
-  }
-
   __device__ __forceinline__ size_t protective_get_kv_offset(IdType page_iter, uint32_t head_idx,
                                                              uint32_t entry_idx, uint32_t feat_idx,
                                                              IdType last_indptr) const {
@@ -189,6 +226,11 @@ struct paged_kv_t {
     } else {
       return 0;
     }
+  }
+
+  __device__ __forceinline__ DType* get_k_ptr(IdType page_iter, uint32_t head_idx,
+                                              uint32_t entry_idx, uint32_t feat_idx) const {
+    return k_data + get_elem_offset(__ldg(indices + page_iter), head_idx, entry_idx, feat_idx);
   }
 
   __device__ __forceinline__ DType* protective_get_k_ptr(IdType page_iter, uint32_t head_idx,
@@ -207,6 +249,43 @@ struct paged_kv_t {
                                                          IdType last_indptr) const {
     return v_data + protective_get_kv_offset(page_iter, head_idx, entry_idx, feat_idx, last_indptr);
   }
+
+  __device__ __forceinline__ DType* get_k_sink_ptr(IdType batch_idx, uint32_t head_idx,
+                                                   uint32_t sink_idx, uint32_t feat_idx) const {
+    return this->sink_k_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+  }
+
+  __device__ __forceinline__ DType* protective_get_k_sink_ptr(IdType batch_idx, uint32_t head_idx,
+                                                              uint32_t sink_idx, uint32_t feat_idx,
+                                                              IdType last_indptr) const {
+    if (sink_idx < last_indptr) {
+      return this->sink_k_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+    }
+    else {
+      return this->sink_k_data;
+    }
+  }
+
+  __device__ __forceinline__ DType* get_v_sink_ptr(IdType batch_idx, uint32_t head_idx,
+                                                   uint32_t sink_idx, uint32_t feat_idx) const {
+    return this->sink_v_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+  }
+
+  __device__ __forceinline__ DType* protective_get_v_sink_ptr(IdType batch_idx, uint32_t head_idx,
+                                                              uint32_t sink_idx, uint32_t feat_idx,
+                                                              IdType last_indptr) const {
+    if (sink_idx < last_indptr) {
+      return this->sink_v_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+    }
+    else {
+      return this->sink_v_data;
+    }
+  }
+
+  __device__ __forceinline__ DType* get_pool_ptr(IdType page_iter, uint32_t head_idx,
+                                                 uint32_t feat_idx) const {
+    return pool_data + get_pool_offset(__ldg(indices + page_iter), head_idx, feat_idx);
+  }
 };
 
 template <typename DType, size_t vec_size>
@@ -215,125 +294,6 @@ __device__ __forceinline__ void vec_reduce(vec_t<DType, vec_size>& tgt_vec,
 #pragma unroll
   for (uint32_t idx = 0; idx < vec_size; idx++) {
     tgt_vec[idx] = tgt_vec[idx] + src_vec[idx];
-  }
-}
-
-/*!
- * \brief CUDA kernel to append new keys/values to the paged key-value cache in the decode phase
- * \tparam head_dim The dimension of each head
- * \tparam vec_size The vector size used in the kernel
- * \tparam DType The data type of the key-value cache
- * \tparam IdType The index data type of the kv-cache
- * \param paged_kv The paged key-value cache
- * \param key The key to be appended
- * \param value The value to be appended
- */
-template <uint32_t head_dim, uint32_t vec_size, typename DType, typename IdType>
-__global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_kv,
-                                               DType* __restrict__ key, DType* __restrict__ value,
-                                               DType* pooling, size_t pooling_stride_n,
-                                               size_t pooling_stride_h) {
-  uint32_t tx = threadIdx.x, ty = threadIdx.y;
-  uint32_t num_heads = paged_kv.num_heads;
-  uint32_t batch_idx = blockIdx.x;
-  uint32_t head_idx = ty;
-  uint32_t sink = 4U;
-
-  // previous token count
-  uint32_t seq_len = (paged_kv.indptr[1] - 1) * paged_kv.page_size + paged_kv.last_page_len[0] - 1;
-
-  uint32_t page_iter = seq_len / paged_kv.page_size;
-  uint32_t page_entry = seq_len % paged_kv.page_size;
-  uint32_t pooling_iter = (seq_len - sink) / paged_kv.page_size;
-  uint32_t pooling_entry = (seq_len - sink) % paged_kv.page_size;
-
-  DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, page_entry, tx * vec_size);
-  DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, page_entry, tx * vec_size);
-
-  vec_t<DType, vec_size>::memcpy(v_ptr, value + head_idx * head_dim + tx * vec_size);
-  vec_t<DType, vec_size>::memcpy(k_ptr, key + head_idx * head_dim + tx * vec_size);
-
-  if (pooling_entry == paged_kv.page_size - 1) {  // last page is full, need reduction
-    vec_t<float, vec_size> local_pool, local_k;
-    local_pool.fill(0.0);
-#pragma unroll
-    for (uint32_t i = 0; i < paged_kv.page_size; i++) {
-      page_iter = (seq_len - paged_kv.page_size + 1 + i) / paged_kv.page_size;
-      page_entry = (seq_len - paged_kv.page_size + 1 + i) % paged_kv.page_size;
-      k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, page_entry, tx * vec_size);
-      local_k.cast_load(k_ptr);
-      vec_reduce<float, vec_size>(local_pool, local_k);
-    }
-    local_pool.cast_store(pooling + pooling_iter * pooling_stride_n + head_idx * pooling_stride_h + tx * vec_size);
-  }
-}
-
-/*!
- * \brief CUDA kernel to append new keys/values to the paged key-value cache in the prefill phase
- * \tparam head_dim The dimension of each head
- * \tparam vec_size The vector size used in the kernel
- * \tparam DType The data type of the key-value cache
- * \tparam IdType The index data type of the kv-cache
- * \param paged_kv The paged key-value cache
- * \param key The key to be appended
- * \param value The value to be appended
- * \param batch_indices The batch indices of elements to be appended
- * \param positions The positions of elements to be appended
- */
-template <uint32_t head_dim, uint32_t vec_size, typename DType, typename IdType>
-__global__ void AppendPagedKVCachePrefillKernel(
-    paged_kv_t<DType, IdType> paged_kv, DType* __restrict__ append_key,
-    DType* __restrict__ append_value, DType* __restrict__ pooling, uint32_t seq_len, uint32_t sink,
-    size_t append_k_stride_n, size_t append_k_stride_h, size_t append_v_stride_n,
-    size_t append_v_stride_h, size_t pooling_stride_n, size_t pooling_stride_h) {
-  uint32_t tx = threadIdx.x, ty = threadIdx.y;
-  uint32_t head_idx = blockIdx.x;
-  uint32_t stride = blockDim.y;
-  uint32_t begin_idx = ty;
-  uint32_t page_size = paged_kv.page_size;
-
-  uint32_t page_iters =
-      paged_kv.indptr[1] - static_cast<uint32_t>(paged_kv.last_page_len[0] <= sink);
-
-  if (ty < sink) {
-    DType* k_ptr = paged_kv.get_k_ptr(0, head_idx, ty, tx * vec_size);
-    DType* v_ptr = paged_kv.get_v_ptr(0, head_idx, ty, tx * vec_size);
-    vec_t<DType, vec_size>::memcpy(
-        k_ptr, append_key + ty * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
-    vec_t<DType, vec_size>::memcpy(v_ptr, append_value + ty * append_v_stride_n +
-                                              head_idx * append_v_stride_h + tx * vec_size);
-  }
-
-#pragma unroll 4
-  // logical page, sink tokens will cause 4 shift to actual value
-  for (uint32_t page_idx = begin_idx; page_idx < page_iters; page_idx += stride) {
-    uint32_t entry_start_idx = 0U;  // prefill, can assure start from 0
-    uint32_t entry_end_idx = min(page_size, seq_len - sink - page_idx * page_size);
-
-    vec_t<float, vec_size> local_pool;
-    local_pool.fill(0.0);
-
-    // entry \in [0, page_size)
-    for (uint32_t entry = entry_start_idx; entry < entry_end_idx; entry++) {
-      uint32_t i_logical = page_idx * page_size + entry;
-      uint32_t i_actual = i_logical + sink;
-      uint32_t page_iter, entry_idx;
-
-      paged_kv.page_size.divmod(i_actual, page_iter, entry_idx);
-
-      DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
-      DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
-
-      vec_t<DType, vec_size>::memcpy(v_ptr, append_value + i_actual * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
-
-      // Key reduction
-      vec_t<float, vec_size> local_k;
-      local_k.cast_load(append_key + i_actual * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
-      vec_reduce<float, vec_size>(local_pool, local_k);
-      local_k.cast_store(k_ptr);
-    }
-
-    local_pool.cast_store(pooling + page_idx * pooling_stride_n + head_idx * pooling_stride_h + tx * vec_size);
   }
 }
 
@@ -387,36 +347,174 @@ cudaError_t BlockSparseIndicesToVectorSparseOffset(
 }
 
 /*!
- * \brief Append new keys/values to the paged key-value cache in the decode phase
+ * \brief CUDA kernel to append new keys/values to the paged key-value cache in the prefill phase
+ * \tparam head_dim The dimension of each head
+ * \tparam vec_size The vector size used in the kernel
  * \tparam DType The data type of the key-value cache
  * \tparam IdType The index data type of the kv-cache
  * \param paged_kv The paged key-value cache
  * \param key The key to be appended
  * \param value The value to be appended
- * \param stream The CUDA stream to execute kernels.
- * \return status Indicates whether CUDA calls are successful
+ * \param batch_indices The batch indices of elements to be appended
+ * \param positions The positions of elements to be appended
  */
-template <typename DType, typename IdType>
-cudaError_t AppendPagedKVCacheDecode(paged_kv_t<DType, IdType> paged_kv, DType* key, DType* value,
-                                     DType* pooling, size_t pooling_stride_n,
-                                     size_t pooling_stride_h, cudaStream_t stream = nullptr) {
-  uint32_t head_dim = paged_kv.head_dim;
-  uint32_t batch_size = paged_kv.batch_size;
+template <uint32_t head_dim, uint32_t vec_size, typename DType, typename IdType>
+__global__ void AppendPagedKVCacheKernel(paged_kv_t<DType, IdType> paged_kv,
+                                         DType* __restrict__ append_key,
+                                         DType* __restrict__ append_value,
+                                         IdType* __restrict__ batch_indices,
+                                         IdType* __restrict__ positions, uint32_t nnz,
+                                         size_t append_k_stride_n, size_t append_k_stride_h,
+                                         size_t append_v_stride_n, size_t append_v_stride_h) {
+  uint32_t tx = threadIdx.x, ty = threadIdx.y;
   uint32_t num_heads = paged_kv.num_heads;
+  uint32_t head_idx = ty;
+  uint32_t cta_id = blockIdx.x;
+  uint32_t num_ctas = gridDim.x;
+
+#pragma unroll 4
+  for (uint32_t i = cta_id; i < nnz; i += num_ctas) {
+    uint32_t page_iter, entry_idx;
+    paged_kv.page_size.divmod(paged_kv.indptr[batch_indices[i]] * paged_kv.page_size + positions[i],
+                              page_iter, entry_idx);
+    DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+    DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+    vec_t<DType, vec_size>::memcpy(
+        k_ptr, append_key + i * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+    vec_t<DType, vec_size>::memcpy(
+        v_ptr, append_value + i * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
+  }
+}
+
+template <uint32_t head_dim, uint32_t vec_size, typename DType, typename IdType>
+__global__ void AppendPagedKVCachePrefillKernel(paged_kv_t<DType, IdType> paged_kv,
+                                         DType* __restrict__ append_key,
+                                         DType* __restrict__ append_value,
+                                         IdType* __restrict__ batch_indices, // page -> batch map
+                                         IdType* __restrict__ positions, // page pos in batch
+                                         IdType* __restrict__  batch_len_indptr, // seqlen cumsum
+                                         size_t append_k_stride_n, size_t append_k_stride_h,
+                                         size_t append_v_stride_n, size_t append_v_stride_h) {
+  uint32_t tx = threadIdx.x, ty = threadIdx.y;
+  uint32_t head_idx = ty;
+  uint32_t cta_id = blockIdx.x;
+  uint32_t num_ctas = gridDim.x;
+
+  uint32_t sink_size = paged_kv.sink_size;
+  uint32_t page_size = paged_kv.page_size;
+  uint32_t batch_size = paged_kv.batch_size;
+  uint32_t num_pages = paged_kv.indptr[batch_size];
+  uint32_t batch_idx, page_idx, token_idx;
+
+  // prologue: handle sink tokens, one cta for one token
+  if (cta_id < batch_size * sink_size) {
+    batch_idx = cta_id / sink_size;
+    uint32_t sink_idx = cta_id % sink_size;
+    token_idx = sink_idx + batch_len_indptr[batch_idx];
+    DType* k_ptr = paged_kv.get_k_sink_ptr(batch_idx, head_idx, sink_idx, tx * vec_size);
+    DType* v_ptr = paged_kv.get_v_sink_ptr(batch_idx, head_idx, sink_idx, tx * vec_size);
+    vec_t<DType, vec_size>::memcpy(
+        k_ptr, append_key + token_idx * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+    vec_t<DType, vec_size>::memcpy(
+        v_ptr, append_value + token_idx * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
+  }
+
+  vec_t<float, vec_size> local_pool, local_k;
+
+#pragma unroll 2
+  for (uint32_t i = cta_id; i < num_pages; i += num_ctas) {
+    batch_idx = batch_indices[i];
+    page_idx = paged_kv.indices[i];
+    local_pool.fill(0.0);
+#pragma unroll 2
+    for (uint32_t j = 0; j < paged_kv.page_size; j++) {
+      DType* k_ptr = paged_kv.get_k_ptr(page_idx, head_idx, j, tx * vec_size);
+      DType* v_ptr = paged_kv.get_v_ptr(page_idx, head_idx, j, tx * vec_size);
+      token_idx = batch_len_indptr[batch_idx] + sink_size + positions[i] * page_size + j;
+      if (positions[i] * page_size + j < paged_kv.get_length(batch_idx)) { // in page
+        // vec_t<DType, vec_size>::memcpy(
+        //   k_ptr, append_key + token_idx * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+        vec_t<DType, vec_size>::memcpy(
+          v_ptr, append_value + token_idx * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
+        local_k.cast_load(append_key + token_idx * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+        vec_reduce<float, vec_size>(local_pool, local_k);
+        local_k.cast_store(k_ptr);
+      } else { // this is last entry
+        // local_pool.fill(0.0);
+        break;
+      }
+    }
+    local_pool.cast_store(paged_kv.get_pool_ptr(i, head_idx, tx * vec_size));
+  }
+}
+
+/*!
+ * \brief CUDA kernel to append new keys/values to the paged key-value cache in the decode phase
+ * \tparam head_dim The dimension of each head
+ * \tparam vec_size The vector size used in the kernel
+ * \tparam DType The data type of the key-value cache
+ * \tparam IdType The index data type of the kv-cache
+ * \param paged_kv The paged key-value cache
+ * \param key The key to be appended
+ * \param value The value to be appended
+ */
+template <uint32_t head_dim, uint32_t vec_size, typename DType, typename IdType>
+__global__ void AppendPagedKVCacheDecodeKernel(paged_kv_t<DType, IdType> paged_kv,
+                                               DType* __restrict__ key, DType* __restrict__ value) {
+  uint32_t tx = threadIdx.x, ty = threadIdx.y;
+  uint32_t num_heads = paged_kv.num_heads;
+  uint32_t batch_idx = blockIdx.x;
+  uint32_t head_idx = ty;
+
+  uint32_t seq_len = paged_kv.get_length(batch_idx);
+
+  uint32_t page_iter = paged_kv.indptr[batch_idx] + (seq_len - 1) / paged_kv.page_size;
+  uint32_t entry_idx = (seq_len - 1) % paged_kv.page_size;
+
+  DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+  DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+  DType* pool_ptr = paged_kv.get_pool_ptr(page_iter, head_idx, tx * vec_size);
+  vec_t<float, vec_size> local_pool, local_k;
+  local_pool.fill(0.0);
+  local_pool.cast_load(pool_ptr);
+  local_k.cast_load(key + (batch_idx * num_heads + head_idx) * head_dim + tx * vec_size);
+  vec_reduce<float, vec_size>(local_pool, local_k);
+  local_k.cast_store(k_ptr);
+  local_pool.cast_store(pool_ptr);
+  vec_t<DType, vec_size>::memcpy(v_ptr, value + (batch_idx * num_heads + head_idx) * head_dim + tx * vec_size);
+}
+
+template <typename DType, typename IdType>
+cudaError_t AppendPagedKVCache(paged_kv_t<DType, IdType> paged_kv, DType* append_key,
+                               DType* append_value, IdType* batch_indices, IdType* positions,
+                               uint32_t nnz, size_t append_k_stride_n, size_t append_k_stride_h,
+                               size_t append_v_stride_n, size_t append_v_stride_h,
+                               cudaStream_t stream = nullptr) {
+  uint32_t head_dim = paged_kv.head_dim;
+  uint32_t num_heads = paged_kv.num_heads;
+  int dev_id = 0;
+  int num_sms = 0;
+  int num_blocks_per_sm = 0;
+  FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+
   DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
     constexpr uint32_t vec_size = std::max(16 / sizeof(DType), HEAD_DIM / 32);
     uint32_t bdx = HEAD_DIM / vec_size;
     uint32_t bdy = num_heads;
-    // NOTE(Zihao): could be slow for small batch size, will optimize later
-    dim3 nblks(batch_size);
+    uint32_t num_threads = bdx * bdy;
+    uint32_t smem_size = 0;
+    auto kernel = AppendPagedKVCacheKernel<HEAD_DIM, vec_size, DType, IdType>;
+    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+                                                                       num_threads, smem_size));
+    num_blocks_per_sm = min(num_blocks_per_sm, ceil_div(int(nnz), num_sms));
+    dim3 nblks(num_blocks_per_sm * num_sms);
     dim3 nthrs(bdx, bdy);
-    auto kernel = AppendPagedKVCacheDecodeKernel<HEAD_DIM, vec_size, DType, IdType>;
-    void* args[] = {(void*)&paged_kv,
-                    (void*)&key,
-                    (void*)&value,
-                    (void*)&pooling,
-                    (void*)&pooling_stride_n,
-                    (void*)&pooling_stride_h};
+
+    void* args[] = {(void*)&paged_kv,          (void*)&append_key,        (void*)&append_value,
+                    (void*)&batch_indices,     (void*)&positions,         (void*)&nnz,
+                    (void*)&append_k_stride_n, (void*)&append_k_stride_h, (void*)&append_v_stride_n,
+                    (void*)&append_v_stride_h};
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
   });
   return cudaSuccess;
@@ -436,31 +534,65 @@ cudaError_t AppendPagedKVCacheDecode(paged_kv_t<DType, IdType> paged_kv, DType* 
  */
 template <typename DType, typename IdType>
 cudaError_t AppendPagedKVCachePrefill(paged_kv_t<DType, IdType> paged_kv, DType* append_key,
-                                      DType* append_value, DType* pooling, uint32_t seq_len,
-                                      uint32_t sink, size_t append_k_stride_n,
+                                      DType* append_value, IdType* batch_indices, IdType* positions,
+                                      IdType* batch_len_indptr, size_t append_k_stride_n,
                                       size_t append_k_stride_h, size_t append_v_stride_n,
-                                      size_t append_v_stride_h, size_t pooling_stride_n,
-                                      size_t pooling_stride_h, cudaStream_t stream = nullptr) {
+                                      size_t append_v_stride_h, cudaStream_t stream = nullptr) {
   uint32_t head_dim = paged_kv.head_dim;
   uint32_t num_heads = paged_kv.num_heads;
   int dev_id = 0;
   int num_sms = 0;
+  int num_blocks_per_sm = 0;
   FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
 
   DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
     constexpr uint32_t vec_size = std::max(16 / sizeof(DType), HEAD_DIM / 32);
-    auto kernel = AppendPagedKVCachePrefillKernel<HEAD_DIM, vec_size, DType, IdType>;
 
     uint32_t bdx = HEAD_DIM / vec_size;
-    uint32_t bdy = 512 / bdx;  // page stride
-    dim3 nblks(num_heads);
+    uint32_t bdy = num_heads;
+    uint32_t num_threads = bdx * bdy;
+    uint32_t smem_size = 0;
+    auto kernel = AppendPagedKVCachePrefillKernel<HEAD_DIM, vec_size, DType, IdType>;
+    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel, num_threads, smem_size));
+
+    dim3 nblks(num_blocks_per_sm * num_sms);
     dim3 nthrs(bdx, bdy);
 
     void* args[] = {(void*)&paged_kv,          (void*)&append_key,        (void*)&append_value,
-                    (void*)&pooling,           (void*)&seq_len,           (void*)&sink,
+                    (void*)&batch_indices,     (void*)&positions,         (void*)&batch_len_indptr,
                     (void*)&append_k_stride_n, (void*)&append_k_stride_h, (void*)&append_v_stride_n,
-                    (void*)&append_v_stride_h, (void*)&pooling_stride_n,  (void*)&pooling_stride_h};
+                    (void*)&append_v_stride_h};
+    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
+  });
+  return cudaSuccess;
+}
+
+/*!
+ * \brief Append new keys/values to the paged key-value cache in the decode phase
+ * \tparam DType The data type of the key-value cache
+ * \tparam IdType The index data type of the kv-cache
+ * \param paged_kv The paged key-value cache
+ * \param key The key to be appended
+ * \param value The value to be appended
+ * \param stream The CUDA stream to execute kernels.
+ * \return status Indicates whether CUDA calls are successful
+ */
+template <typename DType, typename IdType>
+cudaError_t AppendPagedKVCacheDecode(paged_kv_t<DType, IdType> paged_kv, DType* key, DType* value,
+                                     cudaStream_t stream = nullptr) {
+  uint32_t head_dim = paged_kv.head_dim;
+  uint32_t batch_size = paged_kv.batch_size;
+  uint32_t num_heads = paged_kv.num_heads;
+  DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
+    constexpr uint32_t vec_size = std::max(16 / sizeof(DType), HEAD_DIM / 32);
+    uint32_t bdx = HEAD_DIM / vec_size;
+    uint32_t bdy = num_heads;
+    // NOTE(Zihao): could be slow for small batch size, will optimize later
+    dim3 nblks(batch_size);
+    dim3 nthrs(bdx, bdy);
+    auto kernel = AppendPagedKVCacheDecodeKernel<HEAD_DIM, vec_size, DType, IdType>;
+    void* args[] = {(void*)&paged_kv, (void*)&key, (void*)&value};
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
   });
   return cudaSuccess;

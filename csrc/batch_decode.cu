@@ -83,6 +83,7 @@ void BatchDecodeWithPagedKVCacheRun(TensorView float_workspace_buffer,
                                     TensorView q, TensorView paged_k_cache,
                                     TensorView paged_v_cache, TensorView paged_kv_indptr,
                                     TensorView paged_kv_indices, TensorView paged_kv_last_page_len,
+                                    TensorView sink_k, TensorView sink_v,
                                     TensorView o, Optional<TensorView> maybe_lse,
                                     int64_t kv_layout_code, int64_t window_left,
                                     bool enable_pdl ADDITIONAL_FUNC_PARAMS) {
@@ -121,14 +122,13 @@ void BatchDecodeWithPagedKVCacheRun(TensorView float_workspace_buffer,
   const auto q_stride_h = q.stride(1);
 
   // get kv_cache_strides
-  const int64_t* kv_cache_strides = nullptr;
   auto k_strides = paged_k_cache.strides();
   auto v_strides = paged_v_cache.strides();
+  auto sink_k_strides = sink_k.strides();
   TVM_FFI_ICHECK_EQ(k_strides.size(), v_strides.size());
   for (int i = 0; i < k_strides.size(); ++i) {
     TVM_FFI_ICHECK_EQ(k_strides[i], v_strides[i]);
   }
-  kv_cache_strides = k_strides.data();
 
   cudaSetDevice(q.device().device_id);
   const cudaStream_t stream = get_stream(q.device());
@@ -137,9 +137,13 @@ void BatchDecodeWithPagedKVCacheRun(TensorView float_workspace_buffer,
       DTypeQ, DTypeKV, DTypeO, IdType, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
       USE_SLIDING_WINDOW, USE_LOGITS_SOFT_CAP, AttentionVariant, Params, [&] {
         paged_kv_t<DTypeKV, IdType> paged_kv(
-            num_kv_heads, page_size, HEAD_DIM_QK, batch_size, kv_layout,
+            num_kv_heads, page_size, HEAD_DIM_QK, batch_size, /*sink_size=*/4U, kv_layout,
             static_cast<DTypeKV*>(paged_k_cache.data_ptr()),
-            static_cast<DTypeKV*>(paged_v_cache.data_ptr()), kv_cache_strides,
+            static_cast<DTypeKV*>(paged_v_cache.data_ptr()),
+            /*sink_k_data=*/static_cast<DTypeKV*>(sink_k.data_ptr()),
+            /*sink_v_data=*/static_cast<DTypeKV*>(sink_v.data_ptr()),
+            /*pool_data=*/static_cast<DTypeKV*>(nullptr),
+            /*kv_strides=*/k_strides.data(), /*sink_strides=*/sink_k_strides.data(),
             static_cast<IdType*>(paged_kv_indices.data_ptr()),
             static_cast<IdType*>(paged_kv_indptr.data_ptr()),
             static_cast<IdType*>(paged_kv_last_page_len.data_ptr()));

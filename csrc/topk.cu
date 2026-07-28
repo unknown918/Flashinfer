@@ -149,18 +149,26 @@ void radix_topk_ragged_transform(TensorView input, TensorView output_indices, Te
 }
 
 void radix_topk_mask_logits(TensorView logits, TensorView mask_logits, TensorView indptr,
-                            TensorView indices, TensorView row_states_buffer, int64_t top_k_val,
-                            TensorView meta_data, uint32_t group_size, uint32_t page_size) {
+                            TensorView indices, TensorView sparse_indptr, TensorView sparse_indices,
+                            int64_t top_k_val, TensorView num_pages_per_req, uint32_t group_size) {
   CHECK_INPUT(logits);
+  CHECK_INPUT(mask_logits);
   CHECK_INPUT(indptr);
-  CHECK_DIM(2, logits);  // (batch_size, row_size), but only [0, seq_len) has value
-  CHECK_DIM(1, indptr);  // (batch_size + 1)
-  CHECK_DIM(1, indices);
+  CHECK_INPUT(indices);
+  CHECK_INPUT(sparse_indptr);
+  CHECK_INPUT(sparse_indices);
 
-  uint32_t batch_size = logits.size(0);
+  CHECK_DIM(2, logits);  // [num_qo_heads * batch_size, num_total_pages]
+  CHECK_DIM(1, indptr);  // [1 + batch_size]
+  CHECK_DIM(1, indices);
+  CHECK_DIM(1, sparse_indptr);  // [1 + batch_size]
+  CHECK_DIM(1, sparse_indices);
+
+  uint32_t batch_size = indptr.size(0) - 1;
+  uint32_t num_qo_heads = logits.size(0) / batch_size;
   uint32_t row_size = logits.size(1);
 
-  TVM_FFI_ICHECK_EQ(batch_size % group_size, 0) << "batch_size must be divisible by group_size";
+  TVM_FFI_ICHECK_EQ(logits.size(0) % batch_size, 0) << "logits dim 0 must be divisible by batch_size";
 
   cudaSetDevice(logits.device().device_id);
   auto stream = get_stream(logits.device());
@@ -168,16 +176,14 @@ void radix_topk_mask_logits(TensorView logits, TensorView mask_logits, TensorVie
   cudaError_t status;
   auto dtype = logits.dtype();
 
-  sampling::RadixRowState* row_states_ptr = nullptr;
-  row_states_ptr = static_cast<sampling::RadixRowState*>(row_states_buffer.data_ptr());
-
   DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP32_FP16(dtype, c_type, [&] {
-    status = sampling::RadixTopKMaskLogitsMultiCTA<c_type, uint32_t>(
+    status = sampling::RadixTopKMaskLogits<c_type, uint32_t>(
         static_cast<c_type*>(logits.data_ptr()), static_cast<uint32_t*>(mask_logits.data_ptr()),
         static_cast<uint32_t*>(indptr.data_ptr()), static_cast<uint32_t*>(indices.data_ptr()),
-        nullptr, batch_size, static_cast<uint32_t>(top_k_val),
-        static_cast<uint32_t*>(meta_data.data_ptr()), row_size, page_size, group_size,
-        row_states_ptr, stream);
+        static_cast<uint32_t*>(sparse_indptr.data_ptr()),
+        static_cast<uint32_t*>(sparse_indices.data_ptr()), nullptr,
+        static_cast<uint32_t>(top_k_val), batch_size, num_qo_heads, group_size, row_size,
+        static_cast<uint32_t*>(num_pages_per_req.data_ptr()), stream);
     return true;
   });
 

@@ -21,21 +21,25 @@ using namespace flashinfer;
 
 using tvm::ffi::Tensor;
 
-void estimate(TensorView query, TensorView pooling, TensorView meta_data, TensorView out) {
+void estimate(TensorView query, TensorView pooling, TensorView kv_indptr, TensorView kv_indices,
+              TensorView out) {
   CHECK_CONTIGUOUS(query)
   CHECK_CONTIGUOUS(pooling)
   CHECK_CONTIGUOUS(out)
-  CHECK_DIM(2, out);
-  CHECK_DIM(2, query);
-  CHECK_DIM(3, pooling);
+  CHECK_DIM(3, query); // [batch_size, num_qo_head, head_dim]
+  CHECK_DIM(3, pooling); // [max_num_pages, num_kv_head, head_dim]
+  CHECK_DIM(1, kv_indptr);
+  CHECK_DIM(1, kv_indices);
+  CHECK_DIM(2, out); // [batch_size * num_qo_head, max_num_pages]
 
-  int64_t num_qo_heads = query.size(0);
-  int64_t num_total_pages = pooling.size(0);
-  int64_t num_kv_heads = pooling.size(1);
-  int64_t head_dim = pooling.size(2);
+  uint32_t batch_size = kv_indptr.size(0) - 1;
+  uint32_t num_qo_heads = query.size(1);
+  uint32_t max_num_pages = pooling.size(0);
+  uint32_t num_kv_heads = pooling.size(1);
+  uint32_t head_dim = pooling.size(2);
 
-  TVM_FFI_ICHECK_EQ(out.size(0), num_qo_heads);
-  TVM_FFI_ICHECK_EQ(out.size(1), pooling.size(0));
+  TVM_FFI_ICHECK_EQ(out.size(0), batch_size * num_qo_heads);
+  TVM_FFI_ICHECK_EQ(out.size(1), max_num_pages);
 
   cudaSetDevice(query.device().device_id);
   const cudaStream_t stream = get_stream(query.device());
@@ -43,9 +47,10 @@ void estimate(TensorView query, TensorView pooling, TensorView meta_data, Tensor
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
       cudaError_t status = Estimate<HEAD_DIM, c_type>(
           static_cast<c_type*>(query.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
-          static_cast<c_type*>(out.data_ptr()), static_cast<uint32_t>(num_qo_heads),
-          static_cast<uint32_t>(num_kv_heads), static_cast<uint32_t*>(meta_data.data_ptr()),
-          static_cast<uint32_t>(num_total_pages), stream);
+          batch_size, num_qo_heads, num_kv_heads, max_num_pages,
+          static_cast<uint32_t*>(kv_indptr.data_ptr()),
+          static_cast<uint32_t*>(kv_indices.data_ptr()), static_cast<c_type*>(out.data_ptr()),
+          stream);
       TVM_FFI_ICHECK(status == cudaSuccess)
           << "estimation failed with error: " << cudaGetErrorString(status);
       return true;

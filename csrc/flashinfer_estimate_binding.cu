@@ -16,6 +16,7 @@
 #include "tvm_ffi_utils.h"
 
 using tvm::ffi::Tensor;
-void estimate(TensorView query, TensorView pooling, TensorView meta_data, TensorView out);
+void estimate(TensorView query, TensorView pooling, TensorView kv_indptr, TensorView kv_indices,
+              TensorView out);
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(estimate, estimate);

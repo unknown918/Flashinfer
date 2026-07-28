@@ -25,6 +25,7 @@ def make_logits(
 
     return logits
 
+
 boundaries = [
     1024,
     2048,
@@ -42,6 +43,7 @@ seq_lens = sorted({
     if boundary + delta > 0
 })
 
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("topk", [8, 15, 16, 32, 64])
@@ -49,14 +51,11 @@ seq_lens = sorted({
 @pytest.mark.parametrize("max_length", [32768, 131072])
 @pytest.mark.parametrize("seq_len", seq_lens)
 def test_topk_bool_mask_logits(max_length, seq_len, page_size, topk, dtype):
-    device = torch.device("cuda:2")
+    device = torch.device("cuda:0")
 
-    l2_flush_size = int(256) * 1024 * 1024
-    buffer = torch.empty(l2_flush_size, device=device, dtype=torch.int8)
-    buffer.zero_()
-
-    num_kv_head = 8
-    num_qo_head = 32
+    batch_size = 4
+    num_kv_head = 8  * batch_size
+    num_qo_head = 32  * batch_size
     group_size = num_qo_head // num_kv_head
 
     if topk * page_size >= seq_len:

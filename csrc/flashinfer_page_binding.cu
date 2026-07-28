@@ -17,16 +17,24 @@
 
 using tvm::ffi::Tensor;
 
+void append_paged_kv_cache(TensorView append_key, TensorView append_value, TensorView batch_indices,
+                           TensorView positions, TensorView paged_k_cache, TensorView paged_v_cache,
+                           TensorView kv_indices, TensorView kv_indptr, TensorView kv_last_page_len,
+                           int64_t layout);
+
 void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_value,
                                    TensorView paged_k_cache, TensorView paged_v_cache,
                                    TensorView kv_indices, TensorView kv_indptr,
-                                   TensorView kv_last_page_len, uint32_t sink, int64_t layout,
-                                   TensorView pooling);
+                                   TensorView kv_last_page_len, TensorView pooling,
+                                   TensorView sink_k, TensorView sink_v, TensorView batch_indices,
+                                   TensorView positions, TensorView batch_len_indptr,
+                                   int64_t layout);
 
 void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value,
                                   TensorView paged_k_cache, TensorView paged_v_cache,
-                                  TensorView kv_indices, TensorView kv_indptr,
-                                  TensorView kv_last_page_len, int64_t layout, TensorView pooling);
+                                  TensorView kv_indices, TensorView kv_indptr, TensorView pooling,
+                                  TensorView kv_last_page_len, TensorView sink_k, TensorView sink_v,
+                                  int64_t layout);
 
 void append_paged_mla_kv_cache(TensorView append_ckv, TensorView append_kpe,
                                TensorView batch_indices, TensorView positions, TensorView ckv_cache,
@@ -38,6 +46,7 @@ void block_sparse_indices_to_vector_sparse_offsets(
     TensorView vector_sparse_offsets, TensorView vector_sparse_indptr, TensorView kv_len_arr,
     int64_t stride_block, int64_t stride_n, int64_t batch_size, int64_t block_size);
 
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(append_paged_kv_cache, append_paged_kv_cache);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(append_paged_kv_cache_prefill, append_paged_kv_cache_prefill);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(append_paged_kv_cache_decode, append_paged_kv_cache_decode);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(append_paged_mla_kv_cache, append_paged_mla_kv_cache);

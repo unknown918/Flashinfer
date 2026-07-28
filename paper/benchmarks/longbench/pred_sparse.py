@@ -132,15 +132,15 @@ dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
 dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
 
 # config
-device = "cuda:1"
+device = "cuda:0"
 model_name = "Llama-3.1-8B-Instruct"
 max_length = model2maxlen[model_name]
 page_size = 32
-budget = 1024
+budget = 2048
 
 # predict on each dataset
 os.makedirs("pred", exist_ok=True)
-os.makedirs(f"pred/{model_name}-{budget}-no_cuda_graph", exist_ok=True)
+os.makedirs(f"pred/{model_name}-{budget}", exist_ok=True)
 
 tokenizer = AutoTokenizer.from_pretrained(f"./{model_name}", )
 model = AutoModelForCausalLM.from_pretrained(
@@ -158,7 +158,7 @@ model.ss_init(
 
 for dataset in datasets:
     data = []
-    out_path = f"pred/{model_name}-{budget}-no_cuda_graph/{dataset}.jsonl"
+    out_path = f"pred/{model_name}-{budget}/{dataset}.jsonl"
     with open(f"data/{dataset}.jsonl", "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():

@@ -27,12 +27,14 @@ def get_estimate_module():
 def estimate(
         query: torch.Tensor,
         pooling: torch.Tensor,
-        meta_data: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
         out: torch.Tensor,
 ) -> None:
     get_estimate_module().estimate(
         query,
         pooling,
-        meta_data,
+        kv_indptr,
+        kv_indices,
         out
     )
