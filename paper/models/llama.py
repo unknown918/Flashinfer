@@ -41,7 +41,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
 from transformers.models.llama.configuration_llama import LlamaConfig
-from paper.utils.attention import AttentionRunner
+from ..core.runner import AttentionRunner
 
 logger = logging.get_logger(__name__)
 
@@ -121,22 +121,18 @@ class LlamaAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        q = self.q_proj(hidden_states).view(hidden_shape)[0]
-        k = self.k_proj(hidden_states).view(hidden_shape)[0]
-        v = self.v_proj(hidden_states).view(hidden_shape)[0]
+        q = self.q_proj(hidden_states).view(hidden_shape)
+        k = self.k_proj(hidden_states).view(hidden_shape)
+        v = self.v_proj(hidden_states).view(hidden_shape)
 
-        q, k = attn_runner.apply_rope(
-            layer_id=self.layer_idx,
-            q=q,
-            k=k,
-        )
+        attn_runner.layer_id = self.layer_idx
 
-        if q.shape[0] > 1:  # prefill
-            attn_output = attn_runner.prefill(self.layer_idx, q, k, v).unsqueeze(0)
+        if q.shape[1] > 1:  # prefill
+            attn_output = attn_runner.prefill(q, k, v)
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
         else:  # decode
-            attn_output = attn_runner.decode(self.layer_idx, q[0], k[0], v[0]).unsqueeze(0)
+            attn_output = attn_runner.decode(q, k, v)
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
 
@@ -390,6 +386,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             self,
             device: str,
             dtype: torch.dtype,
+            batch_size: int = 1,
+            sink_size: int = 4,
             page_size: int = 32,
             budget: int = 1024,
             max_length: int = 32768,
@@ -397,10 +395,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         topk = (budget + page_size - 1) // page_size
         # costumed sparse attention runner
         self.attn_runner = AttentionRunner(
+            batch_size=batch_size,
             num_layers=self.config.num_hidden_layers,
             head_dim=self.config.head_dim,
             num_kv_heads=self.config.num_key_value_heads,
             num_qo_heads=self.config.num_attention_heads,
+            sink_size=sink_size,
             page_size=page_size,
             max_length=max_length,  # config.max_position_embeddings: 131072
             topk=topk,

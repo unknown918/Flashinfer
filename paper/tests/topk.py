@@ -2,7 +2,7 @@ import torch
 import flashinfer
 import numpy as np
 from flashinfer.testing import bench_gpu_time
-from paper.utils.utils import make_metadata_prefill, ceil_div, make_logits
+from paper.core.utils import make_metadata_prefill, ceil_div, make_logits
 
 device = "cuda:0"
 dtype = torch.float16
@@ -14,18 +14,16 @@ page_size = 32
 num_kv_head = 8
 num_qo_head = 32
 group_size = num_qo_head // num_kv_head
-max_length = 32768
-max_num_pages = max_length // page_size
-
-seq_lens_cpu = [8000, 12000, 13000, 16000]
-batch_size = len(seq_lens_cpu)
-total_pages = sum(ceil_div(seq_len, page_size) for seq_len in seq_lens_cpu)
 
 seq_lens = torch.tensor(
-    seq_lens_cpu,
+    [8000, 8000, 8000, 8000, 8000, 8000, 8000, 8000],
     dtype=torch.int32,
-    device=device,
-)
+    device=device
+).contiguous()
+batch_size = seq_lens.shape[0]
+nnz = int(seq_lens.sum(dim=0))
+max_num_pages = 1024
+total_pages = max_num_pages * batch_size
 
 num_pages_per_req = torch.zeros(batch_size, dtype=torch.int32, device=device)
 kv_indices = torch.zeros(total_pages, dtype=torch.int32, device=device)
@@ -35,19 +33,15 @@ batch_indices = torch.zeros(total_pages, dtype=torch.int32, device=device)
 positions = torch.zeros(total_pages, dtype=torch.int32, device=device)
 batch_len_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
 
-metadata = {
-    "num_pages_per_req": num_pages_per_req,
-    "kv_indices": kv_indices,
-    "kv_indptr": kv_indptr,
-    "kv_last_page_len": kv_last_page_len,
-    "batch_indices": batch_indices,
-    "positions": positions,
-    "batch_len_indptr": batch_len_indptr,
-}
-
 make_metadata_prefill(
     seq_lens,
-    metadata,
+    num_pages_per_req=num_pages_per_req,
+    kv_indices=kv_indices,
+    kv_indptr=kv_indptr,
+    kv_last_page_len=kv_last_page_len,
+    batch_indices=batch_indices,
+    positions=positions,
+    batch_len_indptr=batch_len_indptr,
     sink_size=sink_size,
     page_size=page_size
 )
@@ -90,7 +84,8 @@ def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
     return ref_indptr, ref_indices
 
 
-for batch_idx, seq_len in enumerate(seq_lens_cpu):
+for batch_idx, seq_len in enumerate(seq_lens):
+    seq_len = int(seq_len) - sink_size
     logits_ = make_logits(
         num_qo_head, ceil_div(seq_len, page_size),
         device=device,

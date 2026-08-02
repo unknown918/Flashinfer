@@ -23,13 +23,13 @@ def _build_metadata_prefill_kernel(
     req = tl.arange(0, req_block)
     req_mask = req < num_req
     seq = tl.load(seq_lens + req, mask=req_mask, other=0).to(tl.int32)
-    pages = (seq + page_size - 1) // page_size
-
+    paged_seq = seq - sink_size
+    pages = (paged_seq + page_size - 1) // page_size
     page_end = tl.cumsum(pages, axis=0)
-    token_end = tl.cumsum(tl.where(req_mask, seq + sink_size, 0), axis=0)
+    token_end = tl.cumsum(tl.where(req_mask, seq, 0), axis=0)
 
     tl.store(num_pages_per_req + req, pages, mask=req_mask)
-    tl.store(kv_last_page_len + req, seq - (pages - 1) * page_size, mask=req_mask)
+    tl.store(kv_last_page_len + req, paged_seq - (pages - 1) * page_size, mask=req_mask)
     tl.store(kv_indptr + req + 1, page_end, mask=req_mask)
     tl.store(batch_len_indptr + req + 1, token_end, mask=req_mask)
     tl.store(kv_indptr + req, 0, mask=req == 0)
@@ -52,7 +52,13 @@ def _build_metadata_prefill_kernel(
 
 def make_metadata_prefill(
         seq_lens: torch.Tensor,
-        metadata: dict[str, torch.Tensor],
+        num_pages_per_req: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_last_page_len: torch.Tensor,
+        batch_indices: torch.Tensor,
+        positions: torch.Tensor,
+        batch_len_indptr: torch.Tensor,
         sink_size: int,
         page_size: int,
 ) -> None:
@@ -62,20 +68,20 @@ def make_metadata_prefill(
     assert page_size > 0 and sink_size >= 0
 
     batch_size = seq_lens.numel()
-    total_pages = metadata["kv_indices"].numel()
+    total_pages = int(sum(ceil_div(seq_len - sink_size, page_size) for seq_len in seq_lens))
     req_block = triton.next_power_of_2(batch_size)
     page_block = triton.next_power_of_2(total_pages)
     assert req_block * page_block <= 65536
 
     _build_metadata_prefill_kernel[(1,)](
         seq_lens,
-        metadata["num_pages_per_req"],
-        metadata["kv_indices"],
-        metadata["kv_indptr"],
-        metadata["kv_last_page_len"],
-        metadata["batch_indices"],
-        metadata["positions"],
-        metadata["batch_len_indptr"],
+        num_pages_per_req,
+        kv_indices,
+        kv_indptr,
+        kv_last_page_len,
+        batch_indices,
+        positions,
+        batch_len_indptr,
         num_req=batch_size,
         num_pages=total_pages,
         page_size=page_size,

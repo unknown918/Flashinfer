@@ -662,7 +662,7 @@ def trtllm_destroy_ipc_workspace_for_all_reduce_fusion(
         free_shared_buffer(ipc_handle, group)
 
 
-# allReduce fused quant utils
+# allReduce fused quant core
 def compute_fp4_swizzled_layout_sf_size(total_row, total_column):
     """
     Helper function to compute the padded size of the fp4 swizzled layout.

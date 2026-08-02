@@ -1,6 +1,8 @@
 import torch
 import flashinfer
-from paper.utils.utils import ceil_div, make_metadata_prefill
+from paper.core.utils import ceil_div, make_metadata_prefill
+import numpy as np
+from flashinfer.testing import bench_gpu_time
 
 torch.manual_seed(42)
 
@@ -11,19 +13,15 @@ num_kv_head = 8
 num_qo_head = 32
 head_dim = 128
 dtype = torch.float16
-max_num_pages = 1024
-max_num_batches = 16
-
-seq_lens_cpu = [45, 800, 25, 22]
-nnz = sum(seq_lens_cpu)
-batch_size = len(seq_lens_cpu)
-total_pages = sum(ceil_div(seq_len, page_size) for seq_len in seq_lens_cpu)
 
 seq_lens = torch.tensor(
-    seq_lens_cpu,
+    [16000, 16000, 16000, 16000, 16000, 16000, 16000, 16000],
     dtype=torch.int32,
-    device=device,
-)
+    device=device
+).contiguous()
+batch_size = seq_lens.shape[0]
+nnz = int(seq_lens.sum(dim=0))
+max_num_pages = 1024 * batch_size
 
 append_k = torch.randn(nnz, num_kv_head, head_dim, dtype=dtype, device=device).contiguous()
 append_v = torch.randn(nnz, num_kv_head, head_dim, dtype=dtype, device=device).contiguous()
@@ -32,28 +30,29 @@ pooling = torch.zeros(max_num_pages, num_kv_head, head_dim, dtype=dtype, device=
 paged_k_cache = torch.zeros(max_num_pages, page_size, num_kv_head, head_dim, dtype=dtype, device=device)
 paged_v_cache = torch.zeros(max_num_pages, page_size, num_kv_head, head_dim, dtype=dtype, device=device)
 
-sink_k_cache = torch.zeros(max_num_batches, sink_size, num_kv_head, head_dim, dtype=dtype, device=device)
-sink_v_cache = torch.zeros(max_num_batches, sink_size, num_kv_head, head_dim, dtype=dtype, device=device)
+sink_k_cache = torch.zeros(batch_size, sink_size, num_kv_head, head_dim, dtype=dtype, device=device)
+sink_v_cache = torch.zeros(batch_size, sink_size, num_kv_head, head_dim, dtype=dtype, device=device)
 
 num_pages_per_req = torch.empty(batch_size, dtype=torch.int32, device=device)
-kv_indices = torch.empty(total_pages, dtype=torch.int32, device=device)
+kv_indices = torch.empty(max_num_pages, dtype=torch.int32, device=device)
 kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
 kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device=device)
-batch_indices = torch.empty(total_pages, dtype=torch.int32, device=device)
-positions = torch.empty(total_pages, dtype=torch.int32, device=device)
+batch_indices = torch.empty(max_num_pages, dtype=torch.int32, device=device)
+positions = torch.empty(max_num_pages, dtype=torch.int32, device=device)
 batch_len_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
 
-metadata = {
-    "num_pages_per_req": num_pages_per_req,
-    "kv_indices": kv_indices,
-    "kv_indptr": kv_indptr,
-    "kv_last_page_len": kv_last_page_len,
-    "batch_indices": batch_indices,
-    "positions": positions,
-    "batch_len_indptr": batch_len_indptr,
-}
-
-make_metadata_prefill(seq_lens, metadata, sink_size=4, page_size=16)
+make_metadata_prefill(
+    seq_lens,
+    num_pages_per_req=num_pages_per_req,
+    kv_indices=kv_indices,
+    kv_indptr=kv_indptr,
+    kv_last_page_len=kv_last_page_len,
+    batch_indices=batch_indices,
+    positions=positions,
+    batch_len_indptr=batch_len_indptr,
+    sink_size=sink_size,
+    page_size=page_size
+)
 
 flashinfer.append_paged_kv_cache_prefill(
     append_key=append_k,
@@ -96,4 +95,19 @@ for batch_idx in range(batch_size):
         )
         torch.testing.assert_close(ref_out, out[batch_idx * num_qo_head + qo_head_idx, :end - start])
 
-print("Hello")
+estimate_overhead = np.median(
+    bench_gpu_time(
+        lambda: flashinfer.estimate(
+            query=query,
+            pooling=pooling,
+            kv_indptr=kv_indptr,
+            kv_indices=kv_indices,
+            out=out,
+        ),
+        dry_run_time_ms=100,
+        repeat_time_ms=1000,
+        use_cuda_graph=True,
+    )
+)
+
+print(f"estimate overhead: {estimate_overhead * 1e3:.3f}us")

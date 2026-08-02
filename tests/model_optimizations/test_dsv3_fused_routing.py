@@ -119,7 +119,7 @@ accumulating more numerical error.
 import torch
 import pytest
 from flashinfer.dsv3_ops import NoAuxTc
-# from flashinfer.utils import get_compute_capability
+# from flashinfer.core import get_compute_capability
 
 
 class DSv3RoutingGroundTruth:

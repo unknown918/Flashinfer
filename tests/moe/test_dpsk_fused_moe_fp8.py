@@ -611,7 +611,7 @@ def test_correctness_dpsk_fp8_fused_moe(
     if "compatible_moe_impls" not in weight_processing:
         weight_processing["compatible_moe_impls"] = [type(moe_impl)]
 
-    # Use the complete skip_checks function from utils
+    # Use the complete skip_checks function from core
     skip_checks(
         moe_impl=moe_impl,
         routing_config=routing_config,

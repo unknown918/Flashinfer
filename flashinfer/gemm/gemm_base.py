@@ -2921,7 +2921,7 @@ def group_deepgemm_fp8_nt_groupwise(
     --------
     >>> import torch
     >>> from flashinfer.gemm import group_deepgemm_fp8_nt_groupwise
-    >>> from flashinfer.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+    >>> from flashinfer.core import per_token_cast_to_fp8, per_block_cast_to_fp8
     >>>
     >>> # Setup: 2 groups, 128 tokens per group, 4096 hidden size, 2048 expert size
     >>> m_per_group, n, k = 128, 2048, 4096
@@ -3056,7 +3056,7 @@ def batch_deepgemm_fp8_nt_groupwise(
     --------
     >>> import torch
     >>> from flashinfer.gemm import batch_deepgemm_fp8_nt_groupwise
-    >>> from flashinfer.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+    >>> from flashinfer.core import per_token_cast_to_fp8, per_block_cast_to_fp8
     >>>
     >>> # Setup: 2 groups, 128 tokens per group, 4096 hidden size, 2048 expert size
     >>> m, n, k = 128, 2048, 4096

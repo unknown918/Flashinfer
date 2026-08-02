@@ -2,6 +2,7 @@ import torch
 import math
 import flashinfer
 from flashinfer.decode import get_batch_decode_module
+from paper.core.utils import make_metadata_prefill
 from flashinfer.utils import (
     PosEncodingMode,
     TensorLayout,
@@ -56,7 +57,7 @@ def ref_attn(
     ).to(q.dtype).contiguous()
 
 
-kv_layout = "NHD"
+kv_layout = "HND"
 pos_encoding_mode = "NONE"
 logits_soft_cap = None
 sm_scale = None
@@ -65,15 +66,11 @@ rope_theta = None
 
 device = "cuda:0"
 sink_size = 4
-page_size = 16
-batch_size = 4
-nnz = 228 + sink_size * batch_size
+page_size = 32
 num_kv_heads = 8
 num_qo_heads = 32
 head_dim = 128
 dtype = torch.float16
-max_num_pages = 1024
-max_num_batches = 16
 
 float_workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
 int_workspace_buffer = torch.empty((8 * 1024 * 1024,), dtype=torch.uint8, device=device)
@@ -85,31 +82,48 @@ pin_memory_int_workspace_buffer = torch.empty(
 )
 workspace_size = float_workspace_buffer.numel() * float_workspace_buffer.element_size()
 
-pooling = torch.zeros(max_num_pages, num_kv_heads, head_dim, dtype=dtype, device=device)
-paged_k_cache = torch.zeros(max_num_pages, page_size, num_kv_heads, head_dim, dtype=dtype, device=device)
-paged_v_cache = torch.zeros(max_num_pages, page_size, num_kv_heads, head_dim, dtype=dtype, device=device)
+seq_lens = torch.tensor(
+    [8000, 8000, 8000, 8000, 8000, 8000, 8000, 8000],
+    dtype=torch.int32,
+    device=device
+).contiguous()
+batch_size = seq_lens.shape[0]
+nnz = int(seq_lens.sum(dim=0))
+max_num_pages = 1024 * batch_size
 
-sink_k_cache = torch.zeros(max_num_batches, sink_size, num_kv_heads, head_dim, dtype=dtype, device=device)
-sink_v_cache = torch.zeros(max_num_batches, sink_size, num_kv_heads, head_dim, dtype=dtype, device=device)
+pooling = torch.zeros(max_num_pages, num_kv_heads, head_dim, dtype=dtype, device=device)
+paged_k_cache = torch.zeros(max_num_pages, num_kv_heads, page_size, head_dim, dtype=dtype, device=device)
+paged_v_cache = torch.zeros(max_num_pages, num_kv_heads, page_size, head_dim, dtype=dtype, device=device)
+
+sink_k_cache = torch.zeros(batch_size, num_kv_heads, sink_size, head_dim, dtype=dtype, device=device)
+sink_v_cache = torch.zeros(batch_size, num_kv_heads, sink_size, head_dim, dtype=dtype, device=device)
 
 q = torch.randn(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
 out = torch.randn(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
 append_k = torch.randn(nnz, num_kv_heads, head_dim, dtype=dtype, device=device).contiguous()
 append_v = torch.randn(nnz, num_kv_heads, head_dim, dtype=dtype, device=device).contiguous()
 
-# 45 = (3 - 1) * 16 + 13 + 4
-# 136 = (9 - 1) * 16 + 8 + 4
-# 25 = (2 - 1) * 16 + 9 + 4
-# 22 = (2 - 1) * 16 + 6 + 4
-num_pages_per_req = torch.tensor([3, 9, 2, 2], dtype=torch.int32, device=device)
-kv_indices = torch.arange(16, dtype=torch.int32, device=device)
-kv_indptr = torch.cat([torch.zeros(1).int().to(0), torch.cumsum(num_pages_per_req, dim=0)]).int()
-kv_last_page_len = torch.tensor([13, 8, 9, 6], dtype=torch.int32, device=device)
-batch_indices = torch.tensor([0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 3], dtype=torch.int32, device=device)
-positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 0, 1], dtype=torch.int32, device=device)
+num_pages_per_req = torch.empty(batch_size, dtype=torch.int32, device=device)
+kv_indices = torch.empty(max_num_pages, dtype=torch.int32, device=device)
+kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
+kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device=device)
+batch_indices = torch.empty(max_num_pages, dtype=torch.int32, device=device)
+positions = torch.empty(max_num_pages, dtype=torch.int32, device=device)
+batch_len_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
+output = torch.zeros(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device)
 
-num_tokens_per_req = sink_size + torch.tensor([45, 136, 25, 22], dtype=torch.int32, device=device)
-batch_len_indptr = torch.cat([torch.zeros(1).int().to(0), torch.cumsum(num_tokens_per_req, dim=0)]).int()
+make_metadata_prefill(
+    seq_lens,
+    num_pages_per_req=num_pages_per_req,
+    kv_indices=kv_indices,
+    kv_indptr=kv_indptr,
+    kv_last_page_len=kv_last_page_len,
+    batch_indices=batch_indices,
+    positions=positions,
+    batch_len_indptr=batch_len_indptr,
+    sink_size=sink_size,
+    page_size=page_size
+)
 
 flashinfer.append_paged_kv_cache_prefill(
     append_key=append_k,
@@ -124,7 +138,7 @@ flashinfer.append_paged_kv_cache_prefill(
     batch_indices=batch_indices,
     positions=positions,
     batch_len_indptr=batch_len_indptr,
-    kv_layout="NHD"
+    kv_layout=kv_layout,
 )
 
 kv_indptr_host = kv_indptr.to("cpu", non_blocking=True)  # for split-kv binary search
@@ -197,12 +211,12 @@ _cached_module.run(
     rope_theta,
 )
 
-for i in range(1, batch_size + 1):
+for i in range(batch_size):
     ref_out = ref_attn(
-        q[i - 1],
-        append_k[batch_len_indptr[i - 1]:batch_len_indptr[i]],
-        append_v[batch_len_indptr[i - 1]:batch_len_indptr[i]]
+        q[i],
+        append_k[batch_len_indptr[i]:batch_len_indptr[i + 1]],
+        append_v[batch_len_indptr[i]:batch_len_indptr[i + 1]]
     )
-    torch.testing.assert_close(out[i - 1], ref_out, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(out[i], ref_out, atol=1e-3, rtol=1e-3)
 
 print("Hello")

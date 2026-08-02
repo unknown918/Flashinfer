@@ -104,6 +104,41 @@ def _append_paged_mla_kv_cache_kernel(
 
 
 @register_custom_op(
+    "flashinfer::append_paged_kv_cache",
+    mutates_args=("paged_k_cache", "paged_v_cache"),
+)
+def _append_paged_kv_cache_kernel(
+        append_key: torch.Tensor,
+        append_value: torch.Tensor,
+        batch_indices: torch.Tensor,
+        positions: torch.Tensor,
+        paged_k_cache: Optional[torch.Tensor],
+        paged_v_cache: Optional[torch.Tensor],
+        kv_indices: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_last_page_len: torch.Tensor,
+        layout: int,
+) -> None:
+    batch_indices = batch_indices.int()
+    positions = positions.int()
+    kv_indices = kv_indices.int()
+    kv_indptr = kv_indptr.int()
+    kv_last_page_len = kv_last_page_len.int()
+    get_page_module().append_paged_kv_cache(
+        append_key,
+        append_value,
+        batch_indices,
+        positions,
+        paged_k_cache,
+        paged_v_cache,
+        kv_indices,
+        kv_indptr,
+        kv_last_page_len,
+        layout,
+    )
+
+
+@register_custom_op(
     "flashinfer::append_paged_kv_cache_prefill",
     mutates_args=("paged_k_cache", "paged_v_cache"),
 )
@@ -321,6 +356,31 @@ def append_paged_mla_kv_cache(
     )
 
 
+def append_paged_kv_cache(
+        append_key: torch.Tensor,
+        append_value: torch.Tensor,
+        batch_indices: torch.Tensor,
+        positions: torch.Tensor,
+        paged_kv_cache: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        kv_indices: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_last_page_len: torch.Tensor,
+        kv_layout: str = "NHD",
+) -> None:
+    _check_kv_layout(kv_layout)
+    _append_paged_kv_cache_kernel(
+        append_key,
+        append_value,
+        batch_indices,
+        positions,
+        *_unpack_paged_kv_cache(paged_kv_cache, kv_layout),
+        kv_indices,
+        kv_indptr,
+        kv_last_page_len,
+        TensorLayout[kv_layout].value,
+    )
+
+
 def append_paged_kv_cache_decode(
         append_key: torch.Tensor,
         append_value: torch.Tensor,
@@ -329,6 +389,7 @@ def append_paged_kv_cache_decode(
         kv_indptr: torch.Tensor,
         kv_last_page_len: torch.Tensor,
         pooling: torch.Tensor,
+
         kv_layout: str = "NHD",
 ) -> None:
     _check_kv_layout(kv_layout)

@@ -21,7 +21,7 @@ from ...cpp_ext import is_cuda_version_at_least
 
 
 ################################################################################
-# Epilogue Tag enum and string utils
+# Epilogue Tag enum and string core
 class TrtLlm_EpilogueTag(enum.Enum):
     epilogue_op_default = enum_auto()
     epilogue_op_bias = enum_auto()
@@ -61,7 +61,7 @@ EpiFusionSuffixes = {
 
 
 ################################################################################
-# Quantization Operation and string utils
+# Quantization Operation and string core
 class TrtLlm_QuantOp(enum.Enum):
     per_column_scale_only = enum_auto()
     finegrained_scale_only = enum_auto()

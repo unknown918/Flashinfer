@@ -181,6 +181,61 @@ struct paged_kv_t {
     stride_sink_h = layout == QKVLayout::kHND ? sink_strides[1] : sink_strides[2];
   }
 
+  __host__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size, uint32_t head_dim,
+                                      uint32_t batch_size, QKVLayout layout, DType* k_data,
+                                      DType* v_data, IdType* indices, IdType* indptr,
+                                      IdType* last_page_len, IdType* rope_pos_offset = nullptr)
+      : num_heads(num_heads),
+        page_size(page_size),
+        head_dim(head_dim),
+        batch_size(batch_size),
+        sink_size(0),
+        indices(indices),
+        indptr(indptr),
+        last_page_len(last_page_len),
+        rope_pos_offset(rope_pos_offset) {
+    stride_pool = num_heads * head_dim;
+    stride_page = num_heads * page_size * head_dim;
+    stride_sink = num_heads * this->sink_size * head_dim;
+    this->k_data = k_data;
+    this->v_data = v_data;
+    this->sink_k_data = nullptr;
+    this->sink_v_data = nullptr;
+    this->pool_data = nullptr;
+    stride_n = layout == QKVLayout::kHND ? head_dim : num_heads * head_dim;
+    stride_h = layout == QKVLayout::kHND ? page_size * head_dim : head_dim;
+    stride_sink_n = layout == QKVLayout::kHND ? head_dim : num_heads * head_dim;
+    stride_sink_h = layout == QKVLayout::kHND ? sink_size * head_dim : head_dim;
+  }
+
+  __host__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size, uint32_t head_dim,
+                                      uint32_t batch_size, QKVLayout layout, DType* k_data,
+                                      DType* v_data, const int64_t* kv_strides, IdType* indices,
+                                      IdType* indptr, IdType* last_page_len,
+                                      IdType* rope_pos_offset = nullptr)
+    : num_heads(num_heads),
+      page_size(page_size),
+      head_dim(head_dim),
+      batch_size(batch_size),
+      sink_size(0),
+      indices(indices),
+      indptr(indptr),
+      last_page_len(last_page_len),
+      rope_pos_offset(rope_pos_offset) {
+    stride_pool = num_heads * head_dim;
+    stride_page = kv_strides[0];
+    stride_sink = 0;
+    this->k_data = k_data;
+    this->v_data = v_data;
+    this->sink_k_data = nullptr;
+    this->sink_v_data = nullptr;
+    this->pool_data = nullptr;
+    stride_n = layout == QKVLayout::kHND ? kv_strides[2] : kv_strides[1];
+    stride_h = layout == QKVLayout::kHND ? kv_strides[1] : kv_strides[2];
+    stride_sink_n = 0;
+    stride_sink_h = 0;
+  }
+
   __host__ __device__ __forceinline__ uint32_t get_length(uint32_t batch_idx) const {
     if (indptr[batch_idx + 1] == indptr[batch_idx]) {
       return 0;

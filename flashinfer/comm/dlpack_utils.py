@@ -125,7 +125,7 @@ def create_dlpack_capsule(
       dev_id: device id.
     Returns:
       A PyCapsule object compliant with DLPack specification, which can be directly converted to a
-      tensor using torch.utils.dlpack.from_dlpack
+      tensor using torch.core.dlpack.from_dlpack
     """
     bits_per_elements = 0
     dldata_type_code = 0
