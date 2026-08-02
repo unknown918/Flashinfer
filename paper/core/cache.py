@@ -1,9 +1,7 @@
 import torch
 import flashinfer
-from .utils import *
+from .utils import make_metadata_prefill
 from typing import Union
-
-from ..benchmarks.longbench.pred_sparse import page_size
 
 
 class PagedKVCache:
@@ -84,7 +82,13 @@ class PagedKVCache:
         )
 
     def update_metadata_decode(self) -> None:
-        self.seq_lens += 1
+        self.num_pages_per_req.zero_()
+        self.kv_indices.zero_()
+        self.kv_indptr.zero_()
+        self.kv_last_page_len.zero_()
+        self.batch_indices.zero_()
+        self.positions.zero_()
+        self.batch_len_indptr.zero_()
         make_metadata_prefill(
             seq_lens=self.seq_lens,
             num_pages_per_req=self.num_pages_per_req,
@@ -99,16 +103,14 @@ class PagedKVCache:
         )
 
     def append_page_prefill(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
-        k.flatten(0, 1)
-        v.flatten(0, 1)
         flashinfer.append_paged_kv_cache_prefill(
-            append_key=k,
-            append_value=v,
+            append_key=k.flatten(0, 1),
+            append_value=v.flatten(0, 1),
             paged_kv_cache=(self.paged_k_cache[layer_id], self.paged_v_cache[layer_id]),
             kv_indices=self.kv_indices,
             kv_indptr=self.kv_indptr,
             kv_last_page_len=self.kv_last_page_len,
-            pooling=self.pooling,
+            pooling=self.pooling[layer_id],
             sink_k=self.sink_k_cache,
             sink_v=self.sink_v_cache,
             batch_indices=self.batch_indices,
@@ -118,11 +120,9 @@ class PagedKVCache:
         )
 
     def append_page_decode(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
-        k.flatten(0, 1)
-        v.flatten(0, 1)
         flashinfer.append_paged_kv_cache_decode(
-            append_key=k,
-            append_value=v,
+            append_key=k.flatten(0, 1),
+            append_value=v.flatten(0, 1),
             paged_kv_cache=(self.paged_k_cache[layer_id], self.paged_v_cache[layer_id]),
             kv_indices=self.kv_indices,
             kv_indptr=self.kv_indptr,

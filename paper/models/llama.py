@@ -132,8 +132,8 @@ class LlamaAttention(nn.Module):
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
         else:  # decode
-            attn_output = attn_runner.decode(q, k, v)
-            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            attn_output = attn_runner.decode(q, k, v).unsqueeze(1) # torch.Size([1, 1, 32, 128])
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous() # (1, 1, 4096)
             attn_output = self.o_proj(attn_output)
 
         return attn_output, None
@@ -386,7 +386,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             self,
             device: str,
             dtype: torch.dtype,
-            batch_size: int = 1,
+            batch_size: int,
             sink_size: int = 4,
             page_size: int = 32,
             budget: int = 1024,

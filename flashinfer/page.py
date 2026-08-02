@@ -205,8 +205,8 @@ def _append_paged_kv_cache_decode_kernel(
         kv_indices,
         kv_indptr,
         kv_last_page_len,
+        pooling,
         layout,
-        pooling
     )
 
 
@@ -389,7 +389,6 @@ def append_paged_kv_cache_decode(
         kv_indptr: torch.Tensor,
         kv_last_page_len: torch.Tensor,
         pooling: torch.Tensor,
-
         kv_layout: str = "NHD",
 ) -> None:
     _check_kv_layout(kv_layout)

@@ -74,5 +74,3 @@ flashinfer.append_paged_kv_cache_prefill(
 
 for i in range(num_pages_per_req.sum()):
     torch.testing.assert_close(paged_k_cache[i].sum(dim=1), pooling[i], atol=1e-3, rtol=1e-3)
-
-print("Hello")

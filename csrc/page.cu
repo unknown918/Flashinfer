@@ -122,22 +122,19 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
 
 void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value,
                                   TensorView paged_k_cache, TensorView paged_v_cache,
-                                  TensorView kv_indices, TensorView kv_indptr, TensorView pooling,
-                                  TensorView kv_last_page_len, TensorView sink_k, TensorView sink_v,
-                                  int64_t layout) {
+                                  TensorView kv_indices, TensorView kv_indptr,
+                                  TensorView kv_last_page_len, TensorView pooling, int64_t layout) {
   CHECK_LAST_DIM_CONTIGUOUS(append_key);
   CHECK_LAST_DIM_CONTIGUOUS(append_value);
   // NOTE(Zihao): doesn't have to be contiguous
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(paged_k_cache);
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(paged_v_cache);
   CHECK_LAST_DIM_CONTIGUOUS(pooling)
-  CHECK_LAST_DIM_CONTIGUOUS(sink_k)
-  CHECK_LAST_DIM_CONTIGUOUS(sink_v)
   CHECK_INPUT(kv_indices);
   CHECK_INPUT(kv_indptr);
   CHECK_INPUT(kv_last_page_len);
-  CHECK_DIM(2, append_key);
-  CHECK_DIM(2, append_value);
+  CHECK_DIM(3, append_key);
+  CHECK_DIM(3, append_value);
   CHECK_DIM(4, paged_k_cache);
   CHECK_DIM(4, paged_v_cache);
   CHECK_DIM(1, kv_indices);
@@ -145,8 +142,6 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
   CHECK_DIM(1, kv_last_page_len);
   CHECK_DIM(3, pooling);
   CHECK_DEVICE(pooling, append_key);
-  CHECK_DEVICE(sink_k, append_key);
-  CHECK_DEVICE(sink_v, append_key);
 
   CHECK_DEVICE(append_key, append_key);
   CHECK_DEVICE(append_value, append_key);
@@ -163,11 +158,9 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
   if (kv_layout == QKVLayout::kNHD) {
     page_size = paged_k_cache.size(1);
     num_heads = paged_k_cache.size(2);
-    sink_size = sink_k.size(2);
   } else if (kv_layout == QKVLayout::kHND) {
     num_heads = paged_k_cache.size(1);
     page_size = paged_k_cache.size(2);
-    sink_size = sink_k.size(1);
   }
 
   // get kv_cache_strides
@@ -178,19 +171,19 @@ void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value
   TVM_FFI_ICHECK(std::equal(k_strides.begin(), k_strides.begin() + k_dim, v_strides.begin()))
       << "k/v strides must be identical";
 
-  TVM_FFI_ICHECK_EQ(append_key.size(0), num_heads);
-  TVM_FFI_ICHECK_EQ(append_key.size(1), head_dim);
-  TVM_FFI_ICHECK_EQ(append_value.size(0), num_heads);
-  TVM_FFI_ICHECK_EQ(append_value.size(1), head_dim);
+  TVM_FFI_ICHECK_EQ(append_key.size(1), num_heads);
+  TVM_FFI_ICHECK_EQ(append_key.size(2), head_dim);
+  TVM_FFI_ICHECK_EQ(append_value.size(1), num_heads);
+  TVM_FFI_ICHECK_EQ(append_value.size(2), head_dim);
 
   cudaSetDevice(append_key.device().device_id);
   const cudaStream_t stream = get_stream(append_key.device());
   bool success = DISPATCH_DLPACK_DTYPE_TO_CTYPE(paged_k_cache.dtype(), c_type, [&] {
     paged_kv_t<c_type, int32_t> paged_kv(
-        num_heads, page_size, head_dim, batch_size, sink_size, kv_layout,
+        num_heads, page_size, head_dim, batch_size, 4U, kv_layout,
         static_cast<c_type*>(paged_k_cache.data_ptr()),
-        static_cast<c_type*>(paged_v_cache.data_ptr()), static_cast<c_type*>(sink_k.data_ptr()),
-        static_cast<c_type*>(sink_v.data_ptr()), static_cast<c_type*>(pooling.data_ptr()),
+        static_cast<c_type*>(paged_v_cache.data_ptr()), static_cast<c_type*>(nullptr),
+        static_cast<c_type*>(nullptr), static_cast<c_type*>(pooling.data_ptr()),
         static_cast<int32_t*>(kv_indices.data_ptr()), static_cast<int32_t*>(kv_indptr.data_ptr()),
         static_cast<int32_t*>(kv_last_page_len.data_ptr()));
     cudaError_t status =

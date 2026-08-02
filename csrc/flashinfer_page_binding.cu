@@ -32,9 +32,8 @@ void append_paged_kv_cache_prefill(TensorView append_key, TensorView append_valu
 
 void append_paged_kv_cache_decode(TensorView append_key, TensorView append_value,
                                   TensorView paged_k_cache, TensorView paged_v_cache,
-                                  TensorView kv_indices, TensorView kv_indptr, TensorView pooling,
-                                  TensorView kv_last_page_len, TensorView sink_k, TensorView sink_v,
-                                  int64_t layout);
+                                  TensorView kv_indices, TensorView kv_indptr,
+                                  TensorView kv_last_page_len, TensorView pooling, int64_t layout);
 
 void append_paged_mla_kv_cache(TensorView append_ckv, TensorView append_kpe,
                                TensorView batch_indices, TensorView positions, TensorView ckv_cache,

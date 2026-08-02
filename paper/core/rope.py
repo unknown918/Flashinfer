@@ -1,7 +1,6 @@
-from typing import Tuple
-
 import torch
 import flashinfer
+from typing import Tuple
 
 
 class RoPE:
@@ -25,7 +24,8 @@ class RoPE:
         self.device = device
 
         self.rope_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-        self.rope_offset = torch.zeros(batch_size, dtype=torch.int32, device=self.device)
+        self.rope_offset = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        self.rope_offset_helper = torch.arange(1, batch_size + 1, dtype=torch.int32, device=device)
 
     def update_index_prefill(self, seq_len):
         self.rope_indptr[1:] += seq_len
@@ -33,19 +33,18 @@ class RoPE:
 
     def update_index_decode(self):
         self.rope_offset += self.rope_indptr[1]
-        self.rope_indptr[1:] += 1
+        self.rope_indptr[1:] = self.rope_offset_helper
 
     def apply_rope(
             self,
             q: torch.Tensor,
             k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert q.shape == k.shape
-        assert (q.dim() == 4 and k.dim() == 4)  # (batch_size, seq_len, num_heads, head_dim)
+        assert (q.dim() == 4 and k.dim() == 4)  # (batch-size, seq_len, num_heads, head_dim)
 
         flashinfer.rope.apply_llama31_rope_inplace(
-            q=q,
-            k=k,
+            q=q.flatten(0, 1),
+            k=k.flatten(0, 1),
             indptr=self.rope_indptr,
             offsets=self.rope_offset,
             interleave=self.interleave,

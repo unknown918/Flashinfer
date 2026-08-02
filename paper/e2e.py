@@ -10,12 +10,12 @@ device = "cuda:0"
 batch_size = 1
 sink_size = 4
 page_size = 32
-seq_len = 8192
+seq_len = 4096
 budget = 2048
 max_length = 32768
-max_new_tokens = 100
+max_new_tokens = 2
 prompt_path = "./prompt.txt"
-model_id = "/root/yqj/Llama-3.1-8B-Instruct"
+model_id = "/home1/csu_yqj/Llama-3.1-8B-Instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
@@ -42,11 +42,14 @@ input_ids = tokenizer.apply_chat_template(
     return_tensors="pt"
 )[:, :seq_len].to(device)
 
+input_ids = input_ids.repeat(batch_size, 1).to(device)
+
 with torch.inference_mode():
     # init system
     model.ss_init(
         device=device,
         budget=budget,
+        batch_size=batch_size,
         sink_size=sink_size,
         page_size=page_size,
         max_length=max_length,

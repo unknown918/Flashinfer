@@ -49,7 +49,7 @@ class AttentionRunner:
 
         # decode wrapper and buffers
         self.logits = torch.zeros(batch_size * num_qo_heads, num_pages, dtype=dtype, device=device).contiguous()
-        self.output = torch.zeros(batch_size * num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
+        self.output = torch.zeros(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
         workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device).contiguous()
         self.is_planned = False
         self.dense_decoder = AttentionBatchDecodeWrapper(float_workspace_buffer=workspace_buffer)
@@ -95,10 +95,12 @@ class AttentionRunner:
 
     def proxy_plan(self):
         proxy_indptr = torch.full(
-            (self.cache_manager.num_kv_heads + 1,), self.topk,
+            (self.cache_manager.num_kv_heads, 1), self.topk * self.page_size,
             dtype=torch.int32,
             device=self.device
-        ).cumsum(dim=0, dtype=torch.int32)
+        )
+        proxy_indptr[0] = 0
+        proxy_indptr.cumsum(dim=0, dtype=torch.int32)
 
         self.dense_decoder.plan(
             kv_indptr=proxy_indptr,
@@ -122,18 +124,19 @@ class AttentionRunner:
 
     def prefill(
             self,
-            layer_id: int,
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
     ) -> torch.Tensor:
         assert (q.dim() == 4 and k.dim() == 4 and v.dim() == 4)  # (batch_size, seq_len, num_heads, head_dim)
-        self.rope.update_index_prefill(q.shape[1])
-        q, k = self.rope.apply_rope(q, k)
-        if layer_id == 0:
+
+        if self.layer_id == 0:
+            self.rope.update_index_prefill(q.shape[1])
             self.cache_manager.seq_lens.fill_(q.shape[1])
             self.cache_manager.update_metadata_prefill()
-        self.cache_manager.append_page_prefill(layer_id, k, v)
+
+        q, k = self.rope.apply_rope(q, k)
+        self.cache_manager.append_page_prefill(self.layer_id, k, v)
 
         # no sparsity for prefill
         return flash_attn_func(
@@ -144,19 +147,21 @@ class AttentionRunner:
 
     def decode(
             self,
-            layer_id: int,
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
     ) -> torch.Tensor:
         assert (q.dim() == 4 and k.dim() == 4 and v.dim() == 4)  # (batch_size, seq_len, num_heads, head_dim)
-        self.layer_id = layer_id
-        self.rope.update_index_decode()
-        q, k = self.rope.apply_rope(q, k)
+        assert (q.shape[1] == 1 and k.shape[1] == 1 and v.shape[1] == 1)
+
         if self.layer_id == 0:
+            self.cache_manager.seq_lens += 1
+            self.rope.update_index_decode()
             self.cache_manager.update_metadata_decode()
+
+        q, k = self.rope.apply_rope(q, k)
         self.cache_manager.append_page_decode(self.layer_id, k, v)
-        self.q.copy_(q)
+        self.q.copy_(q[:, 0, :, :])
 
         if self.layer_id < 2:  # no sparsity for the first two layers
             self.dense_decoder.run(
