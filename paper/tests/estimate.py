@@ -15,7 +15,7 @@ head_dim = 128
 dtype = torch.float16
 
 seq_lens = torch.tensor(
-    [16000, 16000, 16000, 16000, 16000, 16000, 16000, 16000],
+    [4096, 4096, 4096, 4096, 4096, 4096],
     dtype=torch.int32,
     device=device
 ).contiguous()
@@ -41,6 +41,8 @@ batch_indices = torch.empty(max_num_pages, dtype=torch.int32, device=device)
 positions = torch.empty(max_num_pages, dtype=torch.int32, device=device)
 batch_len_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
 
+sink_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
+
 make_metadata_prefill(
     seq_lens,
     num_pages_per_req=num_pages_per_req,
@@ -64,6 +66,7 @@ flashinfer.append_paged_kv_cache_prefill(
     pooling=pooling,
     sink_k=sink_k_cache,
     sink_v=sink_v_cache,
+    sink_indices=sink_indices,
     batch_indices=batch_indices,
     positions=positions,
     batch_len_indptr=batch_len_indptr,

@@ -1148,15 +1148,15 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
 
 #pragma unroll
   for (uint32_t i = 0; i < global_batch_idx; i++) {
-    row_start += sparse_indptr[i + 1];
+    row_start += sparse_indptr[i + 1] + 1;
   }
   count = 0;
   unsigned int lower_lane_mask = (1u << lane_id) - 1u;
   int rank = __popc(ballot_mask & lower_lane_mask);
   if (predicate)
     sparse_indices[row_start + row_offset + rank] = indices[indptr[batch_idx] + page_idx] * num_kv_heads + kv_head_idx;
-  // if (page_idx == row_size - 1)  // using last thread to select last page
-  //   sparse_indices[row_start + sparse_indptr[batch_idx + 1]] = indices[indptr[batch_idx + 1] - 1] * num_kv_heads + kv_head_idx;
+  if (page_idx == row_size - 1)  // using last thread to select last page
+    sparse_indices[row_start + sparse_indptr[global_batch_idx + 1]] = indices[indptr[batch_idx + 1] - 1] * num_kv_heads + kv_head_idx;
 
   // Clear histogram buffers and reset arrival counter for next kernel launch (only for multi-CTA)
   // if constexpr (!SINGLE_CTA) {

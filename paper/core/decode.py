@@ -88,7 +88,7 @@ class AttentionSparseDecodeWrapper:
             self._int_workspace_buffer,  # int_workspace_buffer
             self._pin_memory_int_workspace_buffer,  # page_locked_int_workspace_buffer
             kv_indptr_host,  # kv_indptr
-            batch_size * num_kv_heads,  # batch_size
+            batch_size,  # batch_size
             num_qo_heads // num_kv_heads,  # num_qo_heads
             1,  # num_kv_heads,
             page_size,  # page_size
@@ -101,6 +101,7 @@ class AttentionSparseDecodeWrapper:
             torch.empty(0, dtype=q_data_type),
         ]
 
+        self.sink_indices = torch.arange(batch_size, dtype=torch.int32, device=self.device)
         self._plan_info = self._cached_module.plan(*args)
         self._pos_encoding_mode = pos_encoding_mode
         self._use_fp16_qk_reduction = use_fp16_qk_reduction
@@ -152,6 +153,15 @@ class AttentionSparseDecodeWrapper:
             "max_num_pages num_kv_heads page_size head_dim -> (max_num_pages num_kv_heads) 1 page_size head_dim",
         ).contiguous()
 
+        sink_k_cache = einops.rearrange(
+            sink_k_cache,
+            "batch_size num_kv_heads sink_size head_dim -> (batch_size num_kv_heads) 1 sink_size head_dim",
+        ).contiguous()
+        sink_v_cache = einops.rearrange(
+            sink_v_cache,
+            "batch_size num_kv_heads sink_size head_dim -> (batch_size num_kv_heads) 1 sink_size head_dim",
+        ).contiguous()
+
         self._cached_module.run(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -164,6 +174,7 @@ class AttentionSparseDecodeWrapper:
             kv_last_page_len,
             sink_k_cache,
             sink_v_cache,
+            self.sink_indices,
             out,
             None,  # lse
             TensorLayout[kv_layout].value,
@@ -270,6 +281,7 @@ class AttentionBatchDecodeWrapper:
             torch.empty(0, dtype=q_data_type),
         ]
 
+        self.sink_indices = torch.arange(batch_size, dtype=torch.int32, device=self.device)
         self._plan_info = self._cached_module.plan(*args)
         self._pos_encoding_mode = pos_encoding_mode
         self._use_fp16_qk_reduction = use_fp16_qk_reduction
@@ -315,6 +327,7 @@ class AttentionBatchDecodeWrapper:
             kv_last_page_len,
             sink_k_cache,
             sink_v_cache,
+            self.sink_indices,
             out,
             None,  # lse
             TensorLayout[kv_layout].value,

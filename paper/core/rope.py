@@ -56,3 +56,7 @@ class RoPE:
         )
 
         return q, k
+
+    def flush(self):
+        self.rope_indptr.zero_()
+        self.rope_offset.zero_()

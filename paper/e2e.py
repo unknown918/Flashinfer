@@ -6,14 +6,14 @@ from paper.models.llama import LlamaForCausalLM
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
-device = "cuda:0"
+device = "cuda:6"
 batch_size = 1
 sink_size = 4
 page_size = 32
 seq_len = 4096
 budget = 2048
 max_length = 32768
-max_new_tokens = 2
+max_new_tokens = 100
 prompt_path = "./prompt.txt"
 model_id = "/home1/csu_yqj/Llama-3.1-8B-Instruct"
 
@@ -29,18 +29,24 @@ model.eval()
 with open(prompt_path, "r", encoding="utf-8") as f:
     prompt = f.read()
 
-messages = [
-    {
-        "role": "user",
-        "content": f"Please read this article, and summarize it briefly.\n{prompt}\n"
-    },
-]
+prefix = "Please read this article, and summarize it briefly.\n"
+base_messages = [{"role": "user", "content": prefix}]
+base_len = tokenizer.apply_chat_template(
+    base_messages,
+    add_generation_prompt=True,
+    return_tensors="pt",
+).shape[1]
+
+prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+prompt = tokenizer.decode(prompt_ids[: seq_len - base_len])
+
+messages = [{"role": "user", "content": prefix + prompt}]
 
 input_ids = tokenizer.apply_chat_template(
     messages,
     add_generation_prompt=True,
-    return_tensors="pt"
-)[:, :seq_len].to(device)
+    return_tensors="pt",
+).to(device)
 
 input_ids = input_ids.repeat(batch_size, 1).to(device)
 

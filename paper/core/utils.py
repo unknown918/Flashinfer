@@ -19,6 +19,7 @@ def _build_metadata_prefill_kernel(
         sink_size: tl.constexpr,
         req_block: tl.constexpr,
         page_block: tl.constexpr,
+        max_pages_per_batch: tl.constexpr,
 ):
     req = tl.arange(0, req_block)
     req_mask = req < num_req
@@ -45,9 +46,12 @@ def _build_metadata_prefill_kernel(
         axis=1,
     )
     page_mask = page < num_pages
-    tl.store(kv_indices + page, page, mask=page_mask)
+    local_page = page - begin
+    page_index = owner * max_pages_per_batch + local_page
+
+    tl.store(kv_indices + page, page_index, mask=page_mask)
     tl.store(batch_indices + page, owner, mask=page_mask)
-    tl.store(positions + page, page - begin, mask=page_mask)
+    tl.store(positions + page, local_page, mask=page_mask)
 
 
 def make_metadata_prefill(
@@ -62,13 +66,26 @@ def make_metadata_prefill(
         sink_size: int,
         page_size: int,
 ) -> None:
-    """Compute and write metadata in-place"""
+    """Compute and write metadata in-place."""
     assert seq_lens.is_cuda and seq_lens.dtype == torch.int32
     assert seq_lens.ndim == 1 and seq_lens.is_contiguous()
+    assert kv_indices.is_contiguous()
     assert page_size > 0 and sink_size >= 0
 
     batch_size = seq_lens.numel()
-    total_pages = int(sum(ceil_div(seq_len - sink_size, page_size) for seq_len in seq_lens))
+    assert batch_size > 0
+    assert kv_indices.numel() % batch_size == 0
+
+    max_pages_per_batch = kv_indices.numel() // batch_size
+
+    pages_per_req = [
+        ceil_div(int(seq_len) - sink_size, page_size)
+        for seq_len in seq_lens
+    ]
+    assert min(pages_per_req) >= 0
+    assert max(pages_per_req) <= max_pages_per_batch
+
+    total_pages = sum(pages_per_req)
     req_block = triton.next_power_of_2(batch_size)
     page_block = triton.next_power_of_2(total_pages)
     assert req_block * page_block <= 65536
@@ -89,6 +106,7 @@ def make_metadata_prefill(
         req_block=req_block,
         page_block=page_block,
         num_warps=min(8, max(1, page_block // 32)),
+        max_pages_per_batch=max_pages_per_batch,
     )
 
 

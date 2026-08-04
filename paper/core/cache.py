@@ -29,6 +29,7 @@ class PagedKVCache:
         self.dtype = dtype
 
         # metadata for sparse attention's kv cache
+        self.sink_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
         self.seq_lens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.max_num_pages = batch_size * (self.max_length + page_size - 1) // page_size
         self.kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
@@ -111,8 +112,9 @@ class PagedKVCache:
             kv_indptr=self.kv_indptr,
             kv_last_page_len=self.kv_last_page_len,
             pooling=self.pooling[layer_id],
-            sink_k=self.sink_k_cache,
-            sink_v=self.sink_v_cache,
+            sink_k=self.sink_k_cache[layer_id],
+            sink_v=self.sink_v_cache[layer_id],
+            sink_indices=self.sink_indices,
             batch_indices=self.batch_indices,
             positions=self.positions,
             batch_len_indptr=self.batch_len_indptr,

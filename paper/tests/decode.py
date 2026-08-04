@@ -64,7 +64,7 @@ sm_scale = None
 rope_scale = None
 rope_theta = None
 
-device = "cuda:0"
+device = "cuda:3"
 sink_size = 4
 page_size = 32
 num_kv_heads = 8
@@ -111,6 +111,7 @@ batch_indices = torch.empty(max_num_pages, dtype=torch.int32, device=device)
 positions = torch.empty(max_num_pages, dtype=torch.int32, device=device)
 batch_len_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
 output = torch.zeros(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device)
+sink_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
 
 make_metadata_prefill(
     seq_lens,
@@ -135,6 +136,7 @@ flashinfer.append_paged_kv_cache_prefill(
     pooling=pooling,
     sink_k=sink_k_cache,
     sink_v=sink_v_cache,
+    sink_indices=sink_indices,
     batch_indices=batch_indices,
     positions=positions,
     batch_len_indptr=batch_len_indptr,
@@ -199,6 +201,7 @@ _cached_module.run(
     kv_last_page_len,
     sink_k_cache,
     sink_v_cache,
+    sink_indices,
     out,
     None,  # lse
     TensorLayout[kv_layout].value,

@@ -57,12 +57,12 @@ ref_indptr = torch.zeros(batch_size * num_kv_head + 1, dtype=torch.int32, device
 
 
 def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
-    page_indices = torch.topk(_logits, k=k).indices
-    page_indices = page_indices.reshape(num_kv_head, group_size, -1)
+    page_topk = torch.topk(_logits[:, :-1], k=k).indices
+    page_topk = page_topk.reshape(num_kv_head, group_size, -1)
     _indices = kv_indices[kv_indptr[batch_id]: kv_indptr[batch_id + 1]]
 
-    for kv_head_idx, group in enumerate(page_indices):
-        group = group.flatten()
+    for kv_head_idx, group_topk in enumerate(page_topk):
+        group_topk = group_topk.flatten()
         # union_overhead = np.median(
         #     bench_gpu_time(
         #         lambda: torch.unique(
@@ -73,8 +73,15 @@ def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
         #     )
         # )
         # print(f"union_overhead: {union_overhead * 1e3:.3f}us")
-        group_indices = torch.unique(group)
-        group_indices = _indices[group_indices] * num_kv_head + kv_head_idx
+        group_topk = torch.unique(group_topk)
+        group_indices = torch.cat(
+            [
+                _indices[group_topk],
+                _indices[-1:]
+            ],
+            dim=-1,
+        )
+        group_indices = group_indices * num_kv_head + kv_head_idx
         ref_indices = torch.cat(
             [ref_indices, group_indices],
             dim=-1
@@ -125,7 +132,7 @@ topk_overhead = np.median(
             sparse_indices=sparse_indices,
             top_k=k,
             group_size=group_size,
-            num_pages_per_req=num_pages_per_req,
+            num_pages_per_req=num_pages_per_req - 1,
             is_bench=True
         ),
         dry_run_time_ms=100,
@@ -133,7 +140,7 @@ topk_overhead = np.median(
         use_cuda_graph=True
     )
 )
-
+sparse_indptr[1:] += 1
 assert torch.equal(sparse_indptr, ref_indptr)
 
 torch.cumsum(ref_indptr, dim=-1, out=ref_indptr)

@@ -60,6 +60,7 @@ struct paged_kv_t {
   DType* sink_v_data;
   DType* pool_data; // [max_num_pages, num_heads, head_dim]
   IdType* indices;
+  IdType* sink_indices;
 
   // [batch_size + 1] The page indptr array, with the first element 0, the last element nnz_pages
   IdType* indptr;
@@ -91,6 +92,7 @@ struct paged_kv_t {
         indices(nullptr),
         indptr(nullptr),
         last_page_len(nullptr),
+        sink_indices(nullptr),
         rope_pos_offset(nullptr) {}
 
   /*!
@@ -110,8 +112,8 @@ struct paged_kv_t {
   __host__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size, uint32_t head_dim,
                                       uint32_t batch_size, uint32_t sink_size, QKVLayout layout,
                                       DType* k_data, DType* v_data, DType* sink_k_data,
-                                      DType* sink_v_data, DType* pool_data, IdType* indices,
-                                      IdType* indptr, IdType* last_page_len,
+                                      DType* sink_v_data, IdType* sink_indices, DType* pool_data,
+                                      IdType* indices, IdType* indptr, IdType* last_page_len,
                                       IdType* rope_pos_offset = nullptr)
       : num_heads(num_heads),
         page_size(page_size),
@@ -121,6 +123,7 @@ struct paged_kv_t {
         indices(indices),
         indptr(indptr),
         last_page_len(last_page_len),
+        sink_indices(sink_indices),
         rope_pos_offset(rope_pos_offset) {
     stride_pool = num_heads * head_dim;
     stride_page = num_heads * page_size * head_dim;
@@ -154,7 +157,7 @@ struct paged_kv_t {
   __host__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size, uint32_t head_dim,
                                       uint32_t batch_size, uint32_t sink_size, QKVLayout layout,
                                       DType* k_data, DType* v_data, DType* sink_k_data,
-                                      DType* sink_v_data, DType* pool_data,
+                                      DType* sink_v_data, IdType* sink_indices, DType* pool_data,
                                       const int64_t* kv_strides, const int64_t* sink_strides,
                                       IdType* indices, IdType* indptr, IdType* last_page_len,
                                       IdType* rope_pos_offset = nullptr)
@@ -164,6 +167,7 @@ struct paged_kv_t {
         batch_size(batch_size),
         sink_size(sink_size),
         indices(indices),
+        sink_indices(sink_indices),
         indptr(indptr),
         last_page_len(last_page_len),
         rope_pos_offset(rope_pos_offset) {
@@ -190,6 +194,7 @@ struct paged_kv_t {
         head_dim(head_dim),
         batch_size(batch_size),
         sink_size(0),
+        sink_indices(nullptr),
         indices(indices),
         indptr(indptr),
         last_page_len(last_page_len),
@@ -218,6 +223,7 @@ struct paged_kv_t {
       head_dim(head_dim),
       batch_size(batch_size),
       sink_size(0),
+      sink_indices(nullptr),
       indices(indices),
       indptr(indptr),
       last_page_len(last_page_len),
@@ -307,14 +313,14 @@ struct paged_kv_t {
 
   __device__ __forceinline__ DType* get_k_sink_ptr(IdType batch_idx, uint32_t head_idx,
                                                    uint32_t sink_idx, uint32_t feat_idx) const {
-    return this->sink_k_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+    return this->sink_k_data + __ldg(sink_indices + batch_idx) * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
   }
 
   __device__ __forceinline__ DType* protective_get_k_sink_ptr(IdType batch_idx, uint32_t head_idx,
                                                               uint32_t sink_idx, uint32_t feat_idx,
                                                               IdType last_indptr) const {
     if (sink_idx < last_indptr) {
-      return this->sink_k_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+      return this->sink_k_data + __ldg(sink_indices + batch_idx) * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
     }
     else {
       return this->sink_k_data;
@@ -323,14 +329,14 @@ struct paged_kv_t {
 
   __device__ __forceinline__ DType* get_v_sink_ptr(IdType batch_idx, uint32_t head_idx,
                                                    uint32_t sink_idx, uint32_t feat_idx) const {
-    return this->sink_v_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+    return this->sink_v_data + __ldg(sink_indices + batch_idx) * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
   }
 
   __device__ __forceinline__ DType* protective_get_v_sink_ptr(IdType batch_idx, uint32_t head_idx,
                                                               uint32_t sink_idx, uint32_t feat_idx,
                                                               IdType last_indptr) const {
     if (sink_idx < last_indptr) {
-      return this->sink_v_data + batch_idx * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
+      return this->sink_v_data + __ldg(sink_indices + batch_idx) * stride_sink + head_idx * stride_sink_h + sink_idx * stride_sink_n + feat_idx;
     }
     else {
       return this->sink_v_data;
@@ -479,12 +485,11 @@ __global__ void AppendPagedKVCachePrefillKernel(paged_kv_t<DType, IdType> paged_
 #pragma unroll 2
   for (uint32_t i = cta_id; i < num_pages; i += num_ctas) {
     batch_idx = batch_indices[i];
-    page_idx = paged_kv.indices[i];
     local_pool.fill(0.0);
 #pragma unroll 2
     for (uint32_t j = 0; j < paged_kv.page_size; j++) {
-      DType* k_ptr = paged_kv.get_k_ptr(page_idx, head_idx, j, tx * vec_size);
-      DType* v_ptr = paged_kv.get_v_ptr(page_idx, head_idx, j, tx * vec_size);
+      DType* k_ptr = paged_kv.get_k_ptr(i, head_idx, j, tx * vec_size);
+      DType* v_ptr = paged_kv.get_v_ptr(i, head_idx, j, tx * vec_size);
       token_idx = batch_len_indptr[batch_idx] + sink_size + positions[i] * page_size + j;
       if (positions[i] * page_size + j < paged_kv.get_length(batch_idx)) { // in page
         // vec_t<DType, vec_size>::memcpy(

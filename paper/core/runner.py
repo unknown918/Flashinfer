@@ -82,28 +82,30 @@ class AttentionRunner:
 
         # static buffer for decode cuda graph
         self.q = torch.zeros(batch_size, num_qo_heads, head_dim, dtype=dtype, device=self.device).contiguous()
-        self.graphs = [
-            torch.cuda.CUDAGraph()
-            for _ in range(num_layers - 2)
-        ]
-        self.graph_captured = [
-            False
-            for _ in range(num_layers - 2)
-        ]
+        self.graph = torch.cuda.CUDAGraph()
+        self.graph_captured = False
 
         self.proxy_plan()
 
     def proxy_plan(self):
-        proxy_indptr = torch.full(
-            (self.cache_manager.num_kv_heads, 1), self.topk * self.page_size,
+        dense_proxy_indptr = torch.full(
+            (self.batch_size + 1,), self.topk,
             dtype=torch.int32,
             device=self.device
         )
-        proxy_indptr[0] = 0
-        proxy_indptr.cumsum(dim=0, dtype=torch.int32)
+        dense_proxy_indptr[0] = 0
+        torch.cumsum(dense_proxy_indptr, dim=0, out=dense_proxy_indptr)
+
+        sparse_proxy_indptr = torch.full(
+            (self.batch_size * self.cache_manager.num_kv_heads + 1,), self.topk,
+            dtype=torch.int32,
+            device=self.device
+        )
+        sparse_proxy_indptr[0] = 0
+        torch.cumsum(sparse_proxy_indptr, dim=0, out=sparse_proxy_indptr)
 
         self.dense_decoder.plan(
-            kv_indptr=proxy_indptr,
+            kv_indptr=dense_proxy_indptr,
             page_size=self.page_size,
             num_qo_heads=self.cache_manager.num_qo_heads,
             num_kv_heads=self.cache_manager.num_kv_heads,
@@ -113,7 +115,7 @@ class AttentionRunner:
         )
 
         self.sparse_decoder.plan(
-            kv_indptr=proxy_indptr,
+            kv_indptr=sparse_proxy_indptr,
             page_size=self.page_size,
             num_qo_heads=self.cache_manager.num_qo_heads,
             num_kv_heads=self.cache_manager.num_kv_heads,
@@ -139,11 +141,7 @@ class AttentionRunner:
         self.cache_manager.append_page_prefill(self.layer_id, k, v)
 
         # no sparsity for prefill
-        return flash_attn_func(
-            q=q,
-            k=k,
-            v=v,
-        )
+        return flash_attn_func(q=q, k=k, v=v, causal=True)
 
     def decode(
             self,
@@ -178,10 +176,9 @@ class AttentionRunner:
             )
             return self.output
 
-        # g = self.graphs[self.layer_id - 2]
-        # if not self.graph_captured[self.layer_id - 2]:
-        #     self.graph_captured[layer_id - 2] = True
-        #     with torch.cuda.graph(g):
+        # if not self.graph_captured:
+        #     self.graph_captured = True
+        #     with torch.cuda.graph(self.graph):
         flashinfer.estimate(
             query=self.q,
             pooling=self.cache_manager.pooling[self.layer_id],  # / self.cache_manager.page_size,
@@ -200,10 +197,10 @@ class AttentionRunner:
             sparse_indices=self.sparse_indices,
             top_k=self.topk,
             group_size=self.group_size,
-            num_pages_per_req=self.cache_manager.num_pages_per_req,
-            is_bench=True
+            num_pages_per_req=self.cache_manager.num_pages_per_req - 1,  # last page is manually selected
         )
 
+        self.sparse_indptr[1:] += 1
         torch.cumsum(self.sparse_indptr, dim=0, dtype=torch.int32, out=self.sparse_indptr)
 
         self.sparse_decoder.run(
@@ -224,6 +221,6 @@ class AttentionRunner:
         self.logits.zero_()
         self.mask_logits.zero_()
         # else:
-        #     g.replay()
+        #     self.graph.replay()
 
         return self.output

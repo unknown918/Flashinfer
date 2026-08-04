@@ -3,18 +3,15 @@ import argparse
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-
 device = "cuda:0"
 batch_size = 1
 sink_size = 4
 page_size = 32
 seq_len = 4096
-budget = 2048
 max_length = 32768
-max_new_tokens = 1
+max_new_tokens = 10
 prompt_path = "./prompt.txt"
 model_id = "/home1/csu_yqj/Llama-3.1-8B-Instruct"
-
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
@@ -29,18 +26,24 @@ model.eval()
 with open(prompt_path, "r", encoding="utf-8") as f:
     prompt = f.read()
 
-messages = [
-    {
-        "role": "user",
-        "content": f"Please read this article, and tell me what is CuTe Layout.\n{prompt}\n"
-    },
-]
+prefix = "Please read this article, and summarize it briefly.\n"
+base_messages = [{"role": "user", "content": prefix}]
+base_len = tokenizer.apply_chat_template(
+    base_messages,
+    add_generation_prompt=True,
+    return_tensors="pt",
+).shape[1]
+
+prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+prompt = tokenizer.decode(prompt_ids[: seq_len - base_len])
+
+messages = [{"role": "user", "content": prefix + prompt}]
 
 input_ids = tokenizer.apply_chat_template(
     messages,
     add_generation_prompt=True,
-    return_tensors="pt"
-)[:, :seq_len].to(device)
+    return_tensors="pt",
+).to(device)
 
 assert seq_len <= input_ids.shape[1]
 
@@ -77,7 +80,7 @@ with torch.inference_mode():
     torch.cuda.synchronize()
     total_time = time.time() - t1
 
-    tpot = (total_time - ttft) /(max_new_tokens - 1)
+    tpot = (total_time - ttft) / (max_new_tokens - 1)
 
 new_tokens = outputs[0][seq_len:]
 response = tokenizer.decode(new_tokens, skip_special_tokens=True)

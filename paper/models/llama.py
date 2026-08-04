@@ -132,8 +132,8 @@ class LlamaAttention(nn.Module):
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
         else:  # decode
-            attn_output = attn_runner.decode(q, k, v).unsqueeze(1) # torch.Size([1, 1, 32, 128])
-            attn_output = attn_output.reshape(*input_shape, -1).contiguous() # (1, 1, 4096)
+            attn_output = attn_runner.decode(q, k, v)
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()  # (1, 1, 4096)
             attn_output = self.o_proj(attn_output)
 
         return attn_output, None
@@ -410,6 +410,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
     def ss_flush(self):
         self.attn_runner.cache_manager.flush_cache()
+        self.attn_runner.rope.flush()
         torch.cuda.empty_cache()
 
     @can_return_tuple

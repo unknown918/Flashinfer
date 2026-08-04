@@ -96,9 +96,9 @@ __global__ void EstimationKernel(DType* __restrict__ query, DType* __restrict__ 
   uint32_t qo_head_idx = kv_head_idx * bdy + threadIdx.y;
 
   uint32_t kv_chunk_size = ceil_div(num_pages, num_chunks);
-  uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
+  uint32_t chunk_start = min(kv_chunk_idx * kv_chunk_size, num_pages);
   uint32_t chunk_end = min(chunk_start + kv_chunk_size, num_pages);
-  kv_chunk_size = chunk_end - chunk_start;
+  kv_chunk_size = max(chunk_end - chunk_start, 0);
 
   extern __shared__ uint8_t smem[];
 
