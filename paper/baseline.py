@@ -1,5 +1,4 @@
 import time
-import argparse
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -89,6 +88,7 @@ print("\n===== OUTPUT =====\n")
 print(response)
 
 print("\n===== STATS =====")
+print(f"Batch Size  : {batch_size}")
 print(f"Seq Len     : {seq_len}")
 print(f"TTFT        : {ttft * 1e3:.3f} ms")
 print(f"TPOT        : {tpot * 1e3:.3f} ms")

@@ -1,5 +1,6 @@
 import torch
 import math
+import einops
 from typing import Optional, Union
 from flashinfer.decode import get_batch_decode_module
 from flashinfer.utils import (
@@ -9,7 +10,7 @@ from flashinfer.utils import (
 )
 
 
-class AttentionSparseDecodeWrapper:
+class SparseDecodeWrapper:
     def __init__(
             self,
             float_workspace_buffer: torch.Tensor,
@@ -17,19 +18,19 @@ class AttentionSparseDecodeWrapper:
         self._float_workspace_buffer = float_workspace_buffer
         self.device = float_workspace_buffer.device
         self._workspace_size = float_workspace_buffer.numel() * float_workspace_buffer.element_size()
-        self._int_workspace_buffer = torch.empty(
+        self._int_workspace_buffer = torch.zeros(
             8 * 1024 * 1024,
             dtype=torch.uint8,
             device=self.device
         )
-        self._pin_memory_int_workspace_buffer = torch.empty(
+        self._pin_memory_int_workspace_buffer = torch.zeros(
             self._int_workspace_buffer.shape,
             dtype=torch.uint8,
             pin_memory=True,
             device="cpu",
         )
         self._use_cuda_graph = False
-        self._kv_layout = "NHD"
+        self._kv_layout = "HND"
         self._qo_indptr: Optional[torch.Tensor] = None
         self._paged_kv_indptr_buf: Optional[torch.Tensor] = None
         self._paged_kv_indices_buf: Optional[torch.Tensor] = None
@@ -135,7 +136,6 @@ class AttentionSparseDecodeWrapper:
         if self._rope_theta is None:
             self._rope_theta = 1e4
 
-        import einops
         q = einops.rearrange(
             q,
             "batch_size (num_kv_heads gqa_group_size) head_dim -> (batch_size num_kv_heads) gqa_group_size head_dim",
@@ -190,26 +190,22 @@ class AttentionSparseDecodeWrapper:
         return out
 
 
-class AttentionBatchDecodeWrapper:
+class BatchDecodeWrapper:
     def __init__(
             self,
             float_workspace_buffer: torch.Tensor,
     ) -> None:
-        self._float_workspace_buffer = float_workspace_buffer
         self.device = float_workspace_buffer.device
-        self._workspace_size = float_workspace_buffer.numel() * float_workspace_buffer.element_size()
-        self._int_workspace_buffer = torch.empty(
-            8 * 1024 * 1024,
-            dtype=torch.uint8,
-            device=self.device
-        )
-        self._pin_memory_int_workspace_buffer = torch.empty(
+        self._float_workspace_buffer = float_workspace_buffer
+        self._int_workspace_buffer = torch.zeros((8 * 1024 * 1024,), dtype=torch.uint8, device=self.device)
+        self._pin_memory_int_workspace_buffer = torch.zeros(
             self._int_workspace_buffer.shape,
             dtype=torch.uint8,
             pin_memory=True,
             device="cpu",
         )
-        self._use_cuda_graph = False
+        self._workspace_size = float_workspace_buffer.numel() * float_workspace_buffer.element_size()
+        self._use_cuda_graph = True
         self._qo_indptr: Optional[torch.Tensor] = None
         self._paged_kv_indptr_buf: Optional[torch.Tensor] = None
         self._paged_kv_indices_buf: Optional[torch.Tensor] = None

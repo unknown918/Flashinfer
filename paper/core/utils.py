@@ -110,10 +110,6 @@ def make_metadata_prefill(
     )
 
 
-def ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
-
-
 def make_logits(
         num_qo_head: int,
         num_valid_pages: int,
@@ -122,41 +118,27 @@ def make_logits(
         seed: int = 42,
 ):
     assert dtype in (torch.float16, torch.bfloat16), "only fp16/bf16 supported"
-    assert num_qo_head > 0
-    assert num_valid_pages > 0
+    base = 0x3000 if dtype == torch.float16 else 0x3F00
 
-    total_values = num_qo_head * num_valid_pages
+    bits = (torch.arange(num_valid_pages, device=device, dtype=torch.int32) + base).to(torch.int16)
+    logits = bits.view(dtype).unsqueeze(0).expand(num_qo_head, -1).clone()
 
-    if dtype == torch.float16:
-        base = 0x3000
-        max_finite_bits = 0x7BFF
-    else:
-        base = 0x3F00
-        max_finite_bits = 0x7F7F
+    g = torch.Generator(device=device)
+    g.manual_seed(seed)
 
-    capacity = max_finite_bits - base + 1
-    assert total_values <= capacity, (
-        f"Need {total_values} values，but {dtype} can only generate {capacity} values"
-    )
-
-    bits = torch.arange(
-        total_values,
-        device=device,
-        dtype=torch.int32,
-    ) + base
-
-    bits = bits.to(torch.int16)
-    logits = bits.view(dtype)
-
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
-
-    permutation = torch.randperm(
-        total_values,
-        device=device,
-        generator=generator,
-    )
-    logits = logits.index_select(0, permutation)
-    logits = logits.reshape(num_qo_head, num_valid_pages)
+    perm = torch.randperm(num_valid_pages, device=device, generator=g)
+    logits = logits.index_select(1, perm)
 
     return logits
+
+
+def ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def assert_close(a: torch.Tensor, b: torch.Tensor):
+    assert a.dtype == b.dtype
+    if a.dtype == torch.float16:
+        torch.testing.assert_close(a, b, atol=1e-3, rtol=1e-3)
+    elif a.dtype == torch.bfloat16:
+        torch.testing.assert_close(a, b, atol=1e-2, rtol=1e-2)

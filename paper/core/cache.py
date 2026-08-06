@@ -32,13 +32,13 @@ class PagedKVCache:
         self.sink_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
         self.seq_lens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.max_num_pages = batch_size * (self.max_length + page_size - 1) // page_size
-        self.kv_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
-        self.kv_indices = torch.empty(self.max_num_pages, dtype=torch.int32, device=device)
-        self.kv_last_page_len = torch.empty(batch_size, dtype=torch.int32, device=device)
-        self.num_pages_per_req = torch.empty(batch_size, dtype=torch.int32, device=device)
-        self.batch_indices = torch.empty(self.max_num_pages, dtype=torch.int32, device=device)
-        self.positions = torch.empty(self.max_num_pages, dtype=torch.int32, device=device)
-        self.batch_len_indptr = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
+        self.kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        self.kv_indices = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
+        self.kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        self.num_pages_per_req = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        self.batch_indices = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
+        self.positions = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
+        self.batch_len_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
 
         # paged kv cache
         self.paged_k_cache = torch.zeros(

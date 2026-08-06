@@ -26,15 +26,15 @@ void estimate(TensorView query, TensorView pooling, TensorView kv_indptr, Tensor
   CHECK_CONTIGUOUS(query)
   CHECK_CONTIGUOUS(pooling)
   CHECK_CONTIGUOUS(out)
-  CHECK_DIM(3, query); // [batch_size, num_qo_head, head_dim]
-  CHECK_DIM(3, pooling); // [max_num_pages, num_kv_head, head_dim]
+  CHECK_DIM(3, query);    // [batch_size, num_qo_head, head_dim]
+  CHECK_DIM(3, pooling);  // [max_num_pages, num_kv_head, head_dim]
   CHECK_DIM(1, kv_indptr);
   CHECK_DIM(1, kv_indices);
-  CHECK_DIM(2, out); // [batch_size * num_qo_head, max_num_pages]
+  CHECK_DIM(2, out);  // [batch_size * num_qo_head, max_num_pages]
 
   uint32_t batch_size = kv_indptr.size(0) - 1;
   uint32_t num_qo_heads = query.size(1);
-  uint32_t max_num_pages = pooling.size(0);
+  uint32_t max_num_pages = pooling.size(0) / batch_size;
   uint32_t num_kv_heads = pooling.size(1);
   uint32_t head_dim = pooling.size(2);
 

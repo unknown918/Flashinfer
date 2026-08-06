@@ -6,7 +6,7 @@ from paper.models.llama import LlamaForCausalLM
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
-device = "cuda:6"
+device = "cuda:0"
 batch_size = 1
 sink_size = 4
 page_size = 32
@@ -113,6 +113,7 @@ print("\n===== OUTPUT =====\n")
 print(response)
 
 print("\n===== STATS =====\n")
+print(f"Batch Size  : {batch_size}")
 print(f"Seq Len     : {seq_len}")
 print(f"Budget      : {budget}")
 print(f"TTFT        : {ttft * 1e3:.3f} ms")

@@ -3,7 +3,7 @@ import math
 import flashinfer
 from flashinfer.testing import bench_gpu_time
 from paper.core.utils import make_metadata_prefill
-from paper.core.decode import AttentionBatchDecodeWrapper
+from paper.core.decode import BatchDecodeWrapper
 import numpy as np
 
 torch.manual_seed(42)
@@ -122,7 +122,7 @@ flashinfer.append_paged_kv_cache_prefill(
 )
 
 workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device).contiguous()
-decode_wrapper = AttentionBatchDecodeWrapper(float_workspace_buffer=workspace_buffer)
+decode_wrapper = BatchDecodeWrapper(float_workspace_buffer=workspace_buffer)
 
 decode_wrapper.plan(
     kv_indptr=kv_indptr,
