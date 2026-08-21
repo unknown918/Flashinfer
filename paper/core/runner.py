@@ -1,4 +1,5 @@
 import torch
+import os
 import flashinfer
 from flash_attn import flash_attn_func
 from .utils import ceil_div
@@ -19,8 +20,9 @@ class AttentionRunner:
             sink_size: int,
             page_size: int,
             max_length: int,
+            num_dense_layers: int = 2,
             topk: int = 16,
-            dtype: torch.dtype = torch.float16,
+            dtype: torch.dtype = torch.bfloat16,
             device: Union[str, torch.device] = "cuda:0",
     ):
         self.dtype = dtype
@@ -31,6 +33,7 @@ class AttentionRunner:
         self.sink_size = sink_size
         self.page_size = page_size
         self.max_length = max_length
+        self.num_dense_layers = num_dense_layers
         self.group_size = num_qo_heads // num_kv_heads
         num_pages = ceil_div(max_length, page_size)
 
@@ -74,7 +77,6 @@ class AttentionRunner:
             rope_theta=500000.0,
             low_freq_factor=1.0,
             high_freq_factor=4.0,
-            old_context_len=max_length,
             device=device,
         )
 
@@ -167,7 +169,7 @@ class AttentionRunner:
         self.cache_manager.append_page_decode(self.layer_id, k, v)
         self.q.copy_(q[:, 0, :, :])
 
-        if self.layer_id < 2:  # no sparsity for the first two layers
+        if self.layer_id < self.num_dense_layers:  # no sparsity for the first two layers
             self.dense_decoder.run(
                 q=self.q,
                 paged_k_cache=self.cache_manager.paged_k_cache[self.layer_id],
@@ -182,52 +184,69 @@ class AttentionRunner:
             )
             return self.output
 
-        g = self.graphs[self.layer_id - 2]
-        if not self.graph_captured[self.layer_id - 2]:
-            self.graph_captured[self.layer_id - 2] = True
-            with torch.cuda.graph(g):
-                flashinfer.estimate(
-                    query=self.q,
-                    pooling=self.cache_manager.pooling[self.layer_id],  # / self.cache_manager.page_size,
-                    kv_indptr=self.cache_manager.kv_indptr,
-                    kv_indices=self.cache_manager.kv_indices,
-                    out=self.logits,
-                )
+        # g = self.graphs[self.layer_id - self.num_dense_layers]
+        # if not self.graph_captured[self.layer_id - self.num_dense_layers]:
+        #     self.graph_captured[self.layer_id - self.num_dense_layers] = True
+        #     with torch.cuda.graph(g):
+        flashinfer.estimate(
+            query=self.q,
+            pooling=self.cache_manager.pooling[self.layer_id],  # / self.cache_manager.page_size,
+            kv_indptr=self.cache_manager.kv_indptr,
+            kv_indices=self.cache_manager.kv_indices,
+            out=self.logits,
+        )
 
-                # expand top-k token's indices
-                flashinfer.topk_bool_mask_logits(
-                    logits=self.logits,
-                    mask_logits=self.mask_logits,
-                    indptr=self.cache_manager.kv_indptr,
-                    indices=self.cache_manager.kv_indices,
-                    sparse_indptr=self.sparse_indptr,
-                    sparse_indices=self.sparse_indices,
-                    top_k=self.topk,
-                    group_size=self.group_size,
-                    num_pages_per_req=self.num_pages_per_req,
-                )
+        # expand top-k token's indices
+        flashinfer.topk_bool_mask_logits(
+            logits=self.logits,
+            mask_logits=self.mask_logits,
+            indptr=self.cache_manager.kv_indptr,
+            indices=self.cache_manager.kv_indices,
+            sparse_indptr=self.sparse_indptr,
+            sparse_indices=self.sparse_indices,
+            top_k=self.topk,
+            group_size=self.group_size,
+            num_pages_per_req=self.num_pages_per_req,
+        )
 
-                self.sparse_indptr[1:].add_(1)
-                torch.cumsum(self.sparse_indptr, dim=0, dtype=torch.int32, out=self.sparse_indptr)
+        self.sparse_indptr[1:].add_(1)
+        torch.cumsum(self.sparse_indptr, dim=0, dtype=torch.int32, out=self.sparse_indptr)
 
-                self.sparse_decoder.run(
-                    q=self.q,
-                    paged_k_cache=self.cache_manager.paged_k_cache[self.layer_id],
-                    paged_v_cache=self.cache_manager.paged_v_cache[self.layer_id],
-                    sink_k_cache=self.cache_manager.sink_k_cache[self.layer_id],
-                    sink_v_cache=self.cache_manager.sink_v_cache[self.layer_id],
-                    kv_indptr=self.sparse_indptr,
-                    kv_indices=self.sparse_indices,
-                    kv_last_page_len=self.kv_last_page_len,
-                    out=self.output,
-                    kv_layout="HND",
-                )
+        self.sparse_decoder.run(
+            q=self.q,
+            paged_k_cache=self.cache_manager.paged_k_cache[self.layer_id],
+            paged_v_cache=self.cache_manager.paged_v_cache[self.layer_id],
+            sink_k_cache=self.cache_manager.sink_k_cache[self.layer_id],
+            sink_v_cache=self.cache_manager.sink_v_cache[self.layer_id],
+            kv_indptr=self.sparse_indptr,
+            kv_indices=self.sparse_indices,
+            kv_last_page_len=self.kv_last_page_len,
+            out=self.output,
+            kv_layout="HND",
+        )
 
-                self.sparse_indptr.zero_()
-                self.sparse_indices.zero_()
-                self.logits.zero_()
-                self.mask_logits.zero_()
-        else:
-            g.replay()
+        os.makedirs(f"paper/data/{self.batch_size}/", exist_ok=True)
+        os.makedirs(f"paper/data/{self.batch_size}/{self.topk * self.page_size}/", exist_ok=True)
+        os.makedirs(f"paper/data/{self.batch_size}/{self.topk * self.page_size}/", exist_ok=True)
+
+        torch.save(
+            self.sparse_indptr.detach().cpu(),
+            f"paper/data/{self.batch_size}/{self.topk * self.page_size}/sparse_indptr_{self.layer_id}.pt"
+        )
+        torch.save(
+            self.sparse_indices.detach().cpu(),
+            f"paper/data/{self.batch_size}/{self.topk * self.page_size}/sparse_indices_{self.layer_id}.pt"
+        )
+        torch.save(
+            self.kv_last_page_len.detach().cpu(),
+            f"paper/data/{self.batch_size}/{self.topk * self.page_size}/kv_last_page_len_{self.layer_id}.pt"
+        )
+
+        self.sparse_indptr.zero_()
+        self.sparse_indices.zero_()
+        self.logits.zero_()
+        self.mask_logits.zero_()
+        # else:
+        #     g.replay()
 
         return self.output

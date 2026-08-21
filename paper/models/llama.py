@@ -39,7 +39,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
+from transformers.utils import auto_docstring, can_return_tuple, logging
 from transformers.models.llama.configuration_llama import LlamaConfig
 from ..core.runner import AttentionRunner
 
@@ -345,7 +345,7 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+class KwargsForCausalLM(FlashAttentionKwargs, ): ...
 
 
 @auto_docstring
@@ -391,6 +391,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             page_size: int = 32,
             budget: int = 1024,
             max_length: int = 32768,
+            num_dense_layers: int = 2,
     ):
         topk = (budget + page_size - 1) // page_size
         # costumed sparse attention runner
@@ -403,6 +404,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             sink_size=sink_size,
             page_size=page_size,
             max_length=max_length,  # config.max_position_embeddings: 131072
+            num_dense_layers=num_dense_layers,
             topk=topk,
             dtype=dtype,
             device=device

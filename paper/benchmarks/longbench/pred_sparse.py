@@ -111,19 +111,20 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
 
 seed_everything(42)
 
-# full dataset
 # datasets = [
-#     "narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique",
-#     "dureader", "gov_report", "qmsum", "multi_news", "vcsum", "trec", "triviaqa", "samsum", "lsht",
-#     "passage_count", "passage_retrieval_en", "lcc", "repobench-p"
+#     "narrativeqa", "qasper", "multifieldqa_en",  # Single-doc QA
+#     "hotpotqa", "2wikimqa", "musique", "dureader",  # Multi-doc QA
+#     "gov_report", "qmsum", "multi_news", "vcsum",  # Summarization
+#     "trec", "triviaqa", "samsum", "lsht",  # Few shot
+#     "passage_count", "passage_retrieval_en",  # Synthetic
+#     "lcc", "repobench-p"  # Code
 # ]
 
 datasets = [
-    "qasper", "multifieldqa_en",  # Single-Doc QA
-    "hotpotqa", "2wikimqa", "musique",  # Multi-Doc QA
-    "gov_report", "qmsum", "multi_news",  # Summarization
-    "triviaqa",  # Few-shot
-    "passage_retrieval_en",  # Synthetic
+    "dureader",  # Multi-doc QA
+    "gov_report", "qmsum", "multi_news", "vcsum",  # Summarization
+    "trec", "triviaqa", "samsum", "lsht",  # Few shot
+    "passage_count", "passage_retrieval_en",  # Synthetic
     "lcc", "repobench-p"  # Code
 ]
 
@@ -132,11 +133,11 @@ dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
 dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
 
 # config
-device = "cuda:0"
+device = "cuda:1"
 model_name = "Llama-3.1-8B-Instruct"
 max_length = model2maxlen[model_name]
 page_size = 32
-budget = 2048
+budget = 1024
 
 # predict on each dataset
 os.makedirs("pred", exist_ok=True)
@@ -149,6 +150,7 @@ model = AutoModelForCausalLM.from_pretrained(
 ).to(device)
 
 model.ss_init(
+    batch_size=1,
     device=device,
     budget=budget,
     page_size=page_size,
@@ -158,7 +160,7 @@ model.ss_init(
 
 for dataset in datasets:
     data = []
-    out_path = f"pred/{model_name}-{budget}/{dataset}.jsonl"
+    out_path = f"pred/{model_name}-{budget}-rope/{dataset}.jsonl"
     with open(f"data/{dataset}.jsonl", "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():

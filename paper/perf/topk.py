@@ -1,114 +1,185 @@
 import torch
-import flashinfer
 import numpy as np
+import flashinfer
 from flashinfer.testing import bench_gpu_time
+from paper.core.utils import make_metadata_prefill, ceil_div, make_logits
 
 device = "cuda:0"
 torch.manual_seed(42)
 
-k = 2
-page_size = 16
-seq_len = 16000
-max_length = 32768
 
-batch_size = 1
-num_kv_head = 8 * batch_size
-num_qo_head = 32 * batch_size
-group_size = num_qo_head // num_kv_head
+def bench_topk(
+        dtype,
+        topk,
+        page_size,
+        max_length,
+        batch_size,
+        num_kv_heads,
+        num_qo_heads,
+        sink_size,
+        seq_len,
+):
+    seq_lens = torch.zeros(batch_size, dtype=torch.int32, device=device).contiguous()
+    seq_lens.fill_(seq_len)
 
-num_total_pages = max_length // page_size
-num_valid_pages = (seq_len - 4 + page_size - 1) // page_size
-last_page_len = (seq_len - 4) - (num_valid_pages - 1) * page_size
-meta_data = torch.zeros(2, dtype=torch.int32, device=device)
-meta_data[0] = num_valid_pages - 1
+    group_size = num_qo_heads // num_kv_heads
+    max_num_pages = int(max_length / page_size)
+    total_pages = max_num_pages * batch_size
 
-logits = torch.zeros(
-    num_qo_head, num_total_pages,
-    dtype=torch.float16,
-    device=device
-)
+    num_pages_per_req = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    kv_indices = torch.zeros(total_pages, dtype=torch.int32, device=device)
+    kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    batch_indices = torch.zeros(total_pages, dtype=torch.int32, device=device)
+    positions = torch.zeros(total_pages, dtype=torch.int32, device=device)
+    batch_len_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
 
-logits_ = torch.randn(
-    num_qo_head, num_valid_pages,
-    dtype=torch.float16,
-    device=device
-)
-
-logits[:, :num_valid_pages] = logits_
-
-sparse_indptr = torch.zeros(
-    1 + num_kv_head,
-    dtype=torch.int32,
-    device=device
-)
-
-sparse_indices = torch.zeros(
-    num_kv_head * (4 + k * group_size * page_size),
-    dtype=torch.int32,
-    device=device
-)
-
-mask_logits = torch.zeros(
-    num_kv_head,
-    num_total_pages,
-    dtype=torch.int32,
-    device=device
-)
-row_states_buffer = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
-
-topk_overhead = np.median(
-    bench_gpu_time(
-        lambda: flashinfer.topk_bool_mask_logits(
-            logits=logits,
-            mask_logits=mask_logits,
-            indptr=indptr,
-            indices=indices,
-            sparse_indptr=sparse_indptr,
-            sparse_indices=sparse_indices,
-            top_k=k - 1,
-            meta_data=meta_data,
-            group_size=group_size,
-            row_states_buffer=row_states_buffer,
-            is_bench=True
-        ),
-        dry_run_time_ms=100,
-        repeat_time_ms=1000,
-        use_cuda_graph=True
+    make_metadata_prefill(
+        seq_lens,
+        num_pages_per_req=num_pages_per_req,
+        kv_indices=kv_indices,
+        kv_indptr=kv_indptr,
+        kv_last_page_len=kv_last_page_len,
+        batch_indices=batch_indices,
+        positions=positions,
+        batch_len_indptr=batch_len_indptr,
+        sink_size=sink_size,
+        page_size=page_size
     )
-)
 
-_mask_logits = torch.zeros(
-    num_qo_head, num_valid_pages,
-    dtype=torch.int32,
-    device=device
-)
-_sparse_indptr = torch.arange(
-    1 + num_kv_head,
-    dtype=torch.int32,
-    device=device
-)
-_sparse_indices = torch.arange(
-    num_kv_head * (4 + k * group_size * page_size),
-    dtype=torch.int32,
-    device=device
-)
-
-
-def clean_tensor():
-    _sparse_indptr.zero_()
-    _sparse_indices.zero_()
-    _mask_logits.zero_()
-
-
-clean_overhead = np.median(
-    bench_gpu_time(
-        lambda: clean_tensor(),
-        dry_run_time_ms=100,
-        repeat_time_ms=1000,
-        use_cuda_graph=True
+    logits = torch.zeros(
+        batch_size * num_qo_heads, max_num_pages,
+        dtype=dtype,
+        device=device
     )
-)
 
-print(f"total_overhead: {topk_overhead * 1e3:.3f}us")
-print(f"clean_overhead: {clean_overhead * 1e3:.3f}us")
-print(f"topk_overhead: {(topk_overhead - clean_overhead) * 1e3:.3f}us")
+    ref_indices = torch.tensor([], dtype=torch.int32, device=device)
+    ref_indptr = torch.zeros(batch_size * num_kv_heads + 1, dtype=torch.int32, device=device)
+
+    def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
+        torch_union_overhead = 0.0
+        page_topk = torch.topk(_logits[:, :-1], k=topk).indices
+        page_topk = page_topk.reshape(num_kv_heads, group_size, -1)
+        _indices = kv_indices[kv_indptr[batch_id]: kv_indptr[batch_id + 1]]
+
+        for kv_head_idx, group_topk in enumerate(page_topk):
+            group_topk = group_topk.flatten()
+            torch_union_overhead = np.median(
+                bench_gpu_time(
+                    lambda: torch.unique(group_topk),
+                    dry_run_time_ms=100,
+                    repeat_time_ms=1000,
+                )
+            )
+            group_topk = torch.unique(group_topk)
+            group_indices = torch.cat(
+                [
+                    _indices[group_topk],
+                    _indices[-1:]
+                ],
+                dim=-1,
+            )
+            group_indices = group_indices * num_kv_heads + kv_head_idx
+            ref_indices = torch.cat(
+                [ref_indices, group_indices],
+                dim=-1
+            )
+            ref_indptr[batch_id * num_kv_heads + kv_head_idx + 1] = group_indices.size(0)
+
+        return ref_indptr, ref_indices, torch_union_overhead
+
+    for batch_idx, seq_len in enumerate(seq_lens):
+        seq_len = int(seq_len) - sink_size
+        logits_ = make_logits(
+            num_qo_heads, ceil_div(seq_len, page_size),
+            device=device,
+            dtype=dtype,
+        )
+        ref_indptr, ref_indices, torch_union_overhead = ref_expand(logits_, batch_idx, ref_indptr, ref_indices)
+        logits[batch_idx * num_qo_heads:(batch_idx + 1) * num_qo_heads, :ceil_div(seq_len, page_size)] = logits_
+
+    logits.contiguous()
+
+    mask_logits = torch.zeros(
+        batch_size * num_kv_heads, max_num_pages,
+        dtype=torch.int32,
+        device=device
+    )
+
+    sparse_indptr = torch.zeros(
+        1 + batch_size * num_kv_heads,
+        dtype=torch.int32,
+        device=device
+    )
+
+    sparse_indices = torch.zeros(
+        batch_size * num_kv_heads * topk * group_size,
+        dtype=torch.int32,
+        device=device
+    )
+
+    num_pages_per_req.add_(-1)
+    num_pages = ceil_div(seq_len, page_size)
+
+    topk_overhead = np.median(
+        bench_gpu_time(
+            lambda: flashinfer.top_k(
+                input=logits[:, :num_pages].contiguous(),
+                k=topk,
+                sorted=False,
+            ),
+            dry_run_time_ms=100,
+            repeat_time_ms=1000,
+            use_cuda_graph=True
+        )
+    )
+
+    fused_topk_overhead = np.median(
+        bench_gpu_time(
+            lambda: flashinfer.topk_bool_mask_logits(
+                logits=logits,
+                mask_logits=mask_logits,
+                indptr=kv_indptr,
+                indices=kv_indices,
+                sparse_indptr=sparse_indptr,
+                sparse_indices=sparse_indices,
+                top_k=topk,
+                group_size=group_size,
+                num_pages_per_req=num_pages_per_req,
+                is_bench=True
+            ),
+            dry_run_time_ms=100,
+            repeat_time_ms=1000,
+            use_cuda_graph=True
+        )
+    )
+
+    print("=" * 10)
+    print(f"Batch Size: {batch_size}, TopK: {topk}, Seq Len: {seq_len + 4}")
+    print(f"Torch Union Overhead: {torch_union_overhead * 1e3:.2f}us")
+    print(f"TopK Overhead: {topk_overhead * 1e3:.2f}us")
+    print(f"Fused TopK Overhead: {fused_topk_overhead * 1e3:.2f}us")
+
+    torch.cuda.empty_cache()
+
+
+for dtype in [torch.bfloat16]:
+    for page_size in [32]:
+        for max_length in [32768]:
+            for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
+                for batch_size in [1, 2, 4, 8]:
+                    for topk in [32, 64]:
+                        for num_layers in [32]:
+                            for seq_len in [4000, 8000, 16000, 32000]:
+                                with torch.cuda.device(device):
+                                    bench_topk(
+                                        dtype,
+                                        topk,
+                                        page_size,
+                                        max_length,
+                                        batch_size,
+                                        num_kv_heads,
+                                        num_qo_heads,
+                                        sink_size,
+                                        seq_len
+                                    )

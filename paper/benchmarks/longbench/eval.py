@@ -71,7 +71,7 @@ def scorer(dataset, predictions, answers, all_classes):
 
 
 scores = dict()
-model = "Llama-3.1-8B-Instruct-2048"
+model = "Llama-3.1-8B-Instruct-1024-rope"
 path = f"pred/{model}/"
 all_files = os.listdir(path)
 print("Evaluating on:", all_files)

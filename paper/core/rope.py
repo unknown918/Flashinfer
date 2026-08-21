@@ -11,7 +11,6 @@ class RoPE:
             rope_theta: float,
             low_freq_factor: float,
             high_freq_factor: float,
-            old_context_len: int,
             device: str,
     ):
         self.batch_size = batch_size
@@ -19,7 +18,6 @@ class RoPE:
         self.rope_theta = rope_theta
         self.low_freq_factor = low_freq_factor
         self.high_freq_factor = high_freq_factor
-        self.old_context_len = old_context_len
         self.interleave = False
         self.device = device
 
@@ -52,7 +50,6 @@ class RoPE:
             rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,
             high_freq_factor=self.high_freq_factor,
-            old_context_len=self.old_context_len,
         )
 
         return q, k

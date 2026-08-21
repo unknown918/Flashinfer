@@ -61,7 +61,7 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
                 prompt,
                 truncation=False,
                 return_tensors="pt"
-            ).input_ids[0]
+            ).to(device)
 
             # input = tokenizer(prompt, truncation=False, return_tensors="pt").to(device)
             context_length = input.input_ids.shape[-1]
@@ -89,7 +89,7 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
                 )[0]
 
             pred = tokenizer.decode(
-                output,
+                output[context_length:],
                 skip_special_tokens=True
             )
 
@@ -115,11 +115,11 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, out_path):
 seed_everything(42)
 
 datasets = [
-    "qasper", "multifieldqa_en",  # Single-Doc QA
-    "hotpotqa", "2wikimqa", "musique",  # Multi-Doc QA
-    "gov_report", "qmsum", "multi_news",  # Summarization
-    "triviaqa",  # Few-shot
-    "passage_retrieval_en",  # Synthetic
+    "narrativeqa", "qasper", "multifieldqa_en",  # Single-doc QA
+    "hotpotqa", "2wikimqa", "musique", "dureader",  # Multi-doc QA
+    "gov_report", "qmsum", "multi_news", "vcsum",  # Summarization
+    "trec", "triviaqa", "samsum", "lsht",  # Few shot
+    "passage_count", "passage_retrieval_en",  # Synthetic
     "lcc", "repobench-p"  # Code
 ]
 
@@ -127,9 +127,9 @@ model2maxlen = json.load(open("config/model2maxlen.json", "r"))
 dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
 dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
 
-# conifgs
+# configs
 device = "cuda:0"
-model_name = "Qwen3-8B"
+model_name = "Llama-3.1-8B-Instruct"
 max_length = model2maxlen[model_name]
 
 # predict on each dataset
