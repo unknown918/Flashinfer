@@ -33,7 +33,7 @@ class RoPE:
         self.rope_offset += self.rope_indptr[1]
         self.rope_indptr[1:] = self.rope_offset_helper
 
-    def apply_rope(
+    def apply_rope_llama(
             self,
             q: torch.Tensor,
             k: torch.Tensor
@@ -50,6 +50,26 @@ class RoPE:
             rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,
             high_freq_factor=self.high_freq_factor,
+        )
+
+        return q, k
+
+    def apply_rope_qwen(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert (q.dim() == 4 and k.dim() == 4)  # (batch-size, seq_len, num_heads, head_dim)
+
+        flashinfer.rope.apply_rope_inplace(
+            q=q.flatten(0, 1),
+            k=k.flatten(0, 1),
+            indptr=self.rope_indptr,
+            offsets=self.rope_offset,
+            rotary_dim=int(q.shape[-1]),
+            interleave=False,
+            rope_scale=1.0,
+            rope_theta=1000000.0,
         )
 
         return q, k

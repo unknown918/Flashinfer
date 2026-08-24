@@ -11,7 +11,7 @@ export TOKENIZERS_PARALLELISM=false
 MODEL_PATH="/home1/csu_yqj/Llama-3.1-8B-Instruct/"
 PROMPT_PATH="./paper/prompt.txt"
 BATCH_SIZES=(1 2 4 8)
-SEQ_LENS=(8192)
+SEQ_LENS=(4000 8000 16000 32000)
 BUDGETS=(1024 2048)
 
 run_and_cleanup() {

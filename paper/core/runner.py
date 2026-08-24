@@ -131,6 +131,7 @@ class AttentionRunner:
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
+            is_qwen: bool = False,
     ) -> torch.Tensor:
         assert (q.dim() == 4 and k.dim() == 4 and v.dim() == 4)  # (batch_size, seq_len, num_heads, head_dim)
 
@@ -139,7 +140,10 @@ class AttentionRunner:
             self.cache_manager.seq_lens.fill_(q.shape[1])
             self.cache_manager.update_metadata_prefill()
 
-        q, k = self.rope.apply_rope(q, k)
+        if is_qwen:
+            q, k = self.rope.apply_rope_qwen(q, k)
+        else:
+            q, k = self.rope.apply_rope_llama(q, k)
         self.cache_manager.append_page_prefill(self.layer_id, k, v)
 
         # no sparsity for prefill
@@ -150,6 +154,7 @@ class AttentionRunner:
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
+            is_qwen: bool = False,
     ) -> torch.Tensor:
         assert (q.dim() == 4 and k.dim() == 4 and v.dim() == 4)  # (batch_size, seq_len, num_heads, head_dim)
         assert (q.shape[1] == 1 and k.shape[1] == 1 and v.shape[1] == 1)
@@ -165,7 +170,11 @@ class AttentionRunner:
             self.num_pages_per_req.copy_(self.cache_manager.num_pages_per_req)
             self.num_pages_per_req.sub_(1)  # last page is manually selected
 
-        q, k = self.rope.apply_rope(q, k)
+        if is_qwen:
+            q, k = self.rope.apply_rope_qwen(q, k)
+        else:
+            q, k = self.rope.apply_rope_llama(q, k)
+
         self.cache_manager.append_page_decode(self.layer_id, k, v)
         self.q.copy_(q[:, 0, :, :])
 
@@ -225,22 +234,22 @@ class AttentionRunner:
             kv_layout="HND",
         )
 
-        os.makedirs(f"paper/data/{self.batch_size}/", exist_ok=True)
-        os.makedirs(f"paper/data/{self.batch_size}/{self.topk * self.page_size}/", exist_ok=True)
-        os.makedirs(f"paper/data/{self.batch_size}/{self.topk * self.page_size}/", exist_ok=True)
-
-        torch.save(
-            self.sparse_indptr.detach().cpu(),
-            f"paper/data/{self.batch_size}/{self.topk * self.page_size}/sparse_indptr_{self.layer_id}.pt"
-        )
-        torch.save(
-            self.sparse_indices.detach().cpu(),
-            f"paper/data/{self.batch_size}/{self.topk * self.page_size}/sparse_indices_{self.layer_id}.pt"
-        )
-        torch.save(
-            self.kv_last_page_len.detach().cpu(),
-            f"paper/data/{self.batch_size}/{self.topk * self.page_size}/kv_last_page_len_{self.layer_id}.pt"
-        )
+        # os.makedirs(f"paper/data/{self.batch_size}/", exist_ok=True)
+        # os.makedirs(f"paper/data/{self.batch_size}/{self.topk * self.page_size}/", exist_ok=True)
+        # os.makedirs(f"paper/data/{self.batch_size}/{self.topk * self.page_size}/", exist_ok=True)
+        #
+        # torch.save(
+        #     self.sparse_indptr.detach().cpu(),
+        #     f"paper/data/{self.batch_size}/{self.topk * self.page_size}/sparse_indptr_{self.layer_id}.pt"
+        # )
+        # torch.save(
+        #     self.sparse_indices.detach().cpu(),
+        #     f"paper/data/{self.batch_size}/{self.topk * self.page_size}/sparse_indices_{self.layer_id}.pt"
+        # )
+        # torch.save(
+        #     self.kv_last_page_len.detach().cpu(),
+        #     f"paper/data/{self.batch_size}/{self.topk * self.page_size}/kv_last_page_len_{self.layer_id}.pt"
+        # )
 
         self.sparse_indptr.zero_()
         self.sparse_indices.zero_()
