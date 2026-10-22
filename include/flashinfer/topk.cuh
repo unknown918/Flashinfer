@@ -1181,7 +1181,7 @@ cudaError_t RadixTopKMaskLogits(DType* logits, IdType* mask_logits, IdType* indp
                                 uint32_t group_size, uint32_t row_size, uint32_t* num_pages_per_req,
                                 cudaStream_t stream) {
   using OrderedType = typename RadixTopKTraits<DType>::OrderedType;
-  constexpr uint32_t BLOCK_THREADS = 256;
+  const uint32_t block_threads = row_size / group_size;
   const uint32_t vec_size = std::gcd(16 / sizeof(DType), row_size);
 
   // Get device properties
@@ -1190,8 +1190,7 @@ cudaError_t RadixTopKMaskLogits(DType* logits, IdType* mask_logits, IdType* indp
   int num_sms;
   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
   int max_smem_per_block;
-  FLASHINFER_CUDA_CALL(
-      cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
 
   // Fixed shared memory overhead: histogram[256] + suffix_sum[256] + 5 scalars
   constexpr size_t fixed_smem_size = sizeof(uint32_t) * (256 + 256 + 5);
@@ -1201,46 +1200,28 @@ cudaError_t RadixTopKMaskLogits(DType* logits, IdType* mask_logits, IdType* indp
   const size_t available_for_ordered = max_smem_per_block - fixed_smem_aligned;
   uint32_t max_chunk_elements = available_for_ordered / sizeof(OrderedType);
   max_chunk_elements = round_down(max_chunk_elements, vec_size);
-  const uint32_t min_chunk_size = vec_size * BLOCK_THREADS;
+  const uint32_t min_chunk_size = vec_size * block_threads;
   max_chunk_elements = std::max(max_chunk_elements, min_chunk_size);
-  // printf("max_chunk_elements: %d\n", max_chunk_elements);
-  // printf("top_k_val: %d\n", top_k_val);
-
-  // (yqj) note: set to one for cuda graph, seq_len is now on GPU
-  // uint32_t ctas_per_group = ceil_div(seq_len, max_chunk_elements);
-  // uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
-  // chunk_size = round_up(chunk_size, vec_size);
-  // chunk_size = std::min(chunk_size, max_chunk_elements);
-  //
-  // const uint32_t smem_size = fixed_smem_aligned + chunk_size * sizeof(OrderedType);
-
-  // uint32_t chunk_size = ceil_div(seq_len, ctas_per_group);
-  // chunk_size = round_up(chunk_size, vec_size);
-  // chunk_size = std::min(chunk_size, max_chunk_elements);
 
   uint32_t ctas_per_group = 1;
   const uint32_t smem_size = fixed_smem_aligned + row_size * sizeof(OrderedType);
 
-  // Calculate number of groups (how many rows to process concurrently)
-  // uint32_t num_groups =
-  //     std::min(static_cast<uint32_t>(num_sms) / ctas_per_group, batch_size * num_qo_heads);
-  // if (num_groups == 0) num_groups = 1;
-  // uint32_t total_ctas = num_groups * ctas_per_group;
+  DISPATCH_BLOCK_THREADS(
+      block_threads, BLOCK_THREADS,
+      DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+        auto kernel = RadixTopKBoolMaskKernel<BLOCK_THREADS, VEC_SIZE, DType, IdType>;
+        FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
-  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-    auto kernel = RadixTopKBoolMaskKernel<BLOCK_THREADS, VEC_SIZE, DType, IdType>;
-    FLASHINFER_CUDA_CALL(
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        dim3 nblks(batch_size, num_qo_heads);
+        dim3 nthrs(BLOCK_THREADS);
 
-    dim3 nblks(batch_size, num_qo_heads);
-    dim3 nthrs(BLOCK_THREADS);
-
-    void* args[] = {&logits,         &mask_logits,       &indptr,        &indices,  &sparse_indptr,
-                    &sparse_indices, &top_k_arr,         &top_k_val,     &row_size, &num_qo_heads,
-                    &group_size,     &num_pages_per_req, &ctas_per_group};
-    FLASHINFER_CUDA_CALL(
-        cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
-  });
+        void* args[] = {&logits,        &mask_logits,    &indptr,     &indices,
+                        &sparse_indptr, &sparse_indices, &top_k_arr,  &top_k_val,
+                        &row_size,      &num_qo_heads,   &group_size, &num_pages_per_req,
+                        &ctas_per_group};
+        FLASHINFER_CUDA_CALL(
+            cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
+      }));
   return cudaSuccess;
 }
 

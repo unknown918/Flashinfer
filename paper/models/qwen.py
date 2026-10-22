@@ -130,7 +130,7 @@ class Qwen3Attention(nn.Module):
             attn_output = self.o_proj(attn_output)
         else:  # decode
             attn_output = attn_runner.decode(q, k, v, is_qwen=True)
-            attn_output = attn_output.reshape(*input_shape, -1).contiguous()  # (1, 1, 4096)
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
 
         return attn_output, None
@@ -323,6 +323,11 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+
+        # prefill is last layer, load all KV cache to device memory for decode
+        if hidden_states.shape[1] > 1:
+            torch.cuda.synchronize()
+            attn_runner.cache_manager.paged_k_cache = attn_runner.cache_manager.paged_k_cache.to("cuda:0")
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(

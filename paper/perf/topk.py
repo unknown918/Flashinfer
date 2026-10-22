@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import flashinfer
 from flashinfer.testing import bench_gpu_time
-from paper.core.utils import make_metadata_prefill, ceil_div, make_logits
+from ..core.utils import make_metadata_prefill, ceil_div, make_logits
 
 device = "cuda:0"
 torch.manual_seed(42)
@@ -59,18 +59,20 @@ def bench_topk(
     def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
         torch_union_overhead = 0.0
         page_topk = torch.topk(_logits[:, :-1], k=topk).indices
+
+        torch_union_overhead = np.median(
+            bench_gpu_time(
+                lambda: torch.unique(page_topk.repeat_interleave(batch_size, dim=0)),
+                dry_run_time_ms=100,
+                repeat_time_ms=1000,
+            )
+        )
+        
         page_topk = page_topk.reshape(num_kv_heads, group_size, -1)
         _indices = kv_indices[kv_indptr[batch_id]: kv_indptr[batch_id + 1]]
 
         for kv_head_idx, group_topk in enumerate(page_topk):
             group_topk = group_topk.flatten()
-            torch_union_overhead = np.median(
-                bench_gpu_time(
-                    lambda: torch.unique(group_topk),
-                    dry_run_time_ms=100,
-                    repeat_time_ms=1000,
-                )
-            )
             group_topk = torch.unique(group_topk)
             group_indices = torch.cat(
                 [
@@ -167,10 +169,9 @@ for dtype in [torch.bfloat16]:
     for page_size in [32]:
         for max_length in [32768]:
             for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
-                for batch_size in [1, 2, 4, 8]:
-                    for topk in [32, 64]:
-                        for num_layers in [32]:
-                            for seq_len in [4000, 8000, 16000, 32000]:
+                for batch_size in [8]:
+                    for topk in [8, 16, 32, 64]:
+                            for seq_len in [4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000]:
                                 with torch.cuda.device(device):
                                     bench_topk(
                                         dtype,

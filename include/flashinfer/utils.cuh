@@ -272,6 +272,30 @@
     }                                                                            \
   }
 
+#define DISPATCH_BLOCK_THREADS(block_threads, BLOCK_THREADS, ...) \
+  switch (block_threads) {                                        \
+    case 256: {                                                   \
+      constexpr uint32_t BLOCK_THREADS = 256;                     \
+      __VA_ARGS__                                                 \
+      break;                                                      \
+    }                                                             \
+    case 512: {                                                   \
+      constexpr uint32_t BLOCK_THREADS = 512;                     \
+      __VA_ARGS__                                                 \
+      break;                                                      \
+    }                                                             \
+    case 1024: {                                                  \
+      constexpr uint32_t BLOCK_THREADS = 1024;                    \
+      __VA_ARGS__                                                 \
+      break;                                                      \
+    }                                                             \
+    default: {                                                    \
+      std::ostringstream err_msg;                                 \
+      err_msg << "Unsupported block_threads: " << block_threads;  \
+      FLASHINFER_ERROR(err_msg.str());                            \
+    }                                                             \
+  }
+
 #define DISPATCH_ALIGNED_VEC_SIZE(aligned_vec_size, ALIGNED_VEC_SIZE, ...) \
   switch (aligned_vec_size) {                                              \
     case 16: {                                                             \

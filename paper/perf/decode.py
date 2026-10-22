@@ -161,7 +161,7 @@ def bench_batch_decode_overhead(
         )
         assert_close(output[i], ref_out)
 
-    batch_decode_overhead = np.median(
+    sink_decode_overhead = np.median(
         bench_gpu_time(
             lambda: decode_wrapper.run(
                 q=q,
@@ -184,7 +184,7 @@ def bench_batch_decode_overhead(
     _q = torch.randn(batch_size * num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
     _k = torch.randn(int(seq_lens[0]), batch_size * num_kv_heads, head_dim, dtype=dtype, device=device).contiguous()
     _v = torch.randn(int(seq_lens[0]), batch_size * num_kv_heads, head_dim, dtype=dtype, device=device).contiguous()
-    single_decode_overhead = np.median(
+    batch_decode_overhead = np.median(
         bench_gpu_time(
             lambda: flashinfer.single_decode_with_kv_cache(
                 _q,
@@ -198,8 +198,8 @@ def bench_batch_decode_overhead(
     )
 
     print(f"Batch Size {batch_size}, SeqLen: {seq_len}")
-    print(f"Single Decode Overhead: {single_decode_overhead:.2f}ms")
-    print(f"Batch Decode Overhead: {batch_decode_overhead:.2f}ms")
+    print(f"Sink Decode Overhead: {sink_decode_overhead * 1000:.2f}us")
+    print(f"Batch Decode Overhead: {batch_decode_overhead * 1000:.2f}us")
     print("=" * 20)
 
 
@@ -208,7 +208,7 @@ for dtype in [torch.bfloat16]:
         for max_length in [32768]:
             for head_dim in [128]:
                 for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
-                    for seq_len in [1000, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 32000]:
+                    for seq_len in [4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000]:
                         for batch_size in [1, 2, 4, 8]:
                             with torch.cuda.device(device):
                                 bench_batch_decode_overhead(

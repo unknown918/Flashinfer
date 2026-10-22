@@ -21,31 +21,37 @@ def _build_metadata_prefill_kernel(
         page_block: tl.constexpr,
         max_pages_per_batch: tl.constexpr,
 ):
+    pid = tl.program_id(0)
+
     req = tl.arange(0, req_block)
     req_mask = req < num_req
+
     seq = tl.load(seq_lens + req, mask=req_mask, other=0).to(tl.int32)
     paged_seq = seq - sink_size
     pages = (paged_seq + page_size - 1) // page_size
     page_end = tl.cumsum(pages, axis=0)
     token_end = tl.cumsum(tl.where(req_mask, seq, 0), axis=0)
 
-    tl.store(num_pages_per_req + req, pages, mask=req_mask)
-    tl.store(kv_last_page_len + req, paged_seq - (pages - 1) * page_size, mask=req_mask)
-    tl.store(kv_indptr + req + 1, page_end, mask=req_mask)
-    tl.store(batch_len_indptr + req + 1, token_end, mask=req_mask)
-    tl.store(kv_indptr + req, 0, mask=req == 0)
-    tl.store(batch_len_indptr + req, 0, mask=req == 0)
+    # Only the first program writes request-level metadata.
+    first_program = pid == 0
+    tl.store(num_pages_per_req + req, pages, mask=req_mask & first_program)
+    tl.store(kv_last_page_len + req, paged_seq - (pages - 1) * page_size, mask=req_mask & first_program)
+    tl.store(kv_indptr + req + 1, page_end, mask=req_mask & first_program)
+    tl.store(batch_len_indptr + req + 1, token_end, mask=req_mask & first_program)
+    tl.store(kv_indptr, 0, mask=first_program)
+    tl.store(batch_len_indptr, 0, mask=first_program)
 
-    # Every page compares against all request ends in parallel.
-    page = tl.arange(0, page_block)
-    owner = tl.sum(
-        (page[:, None] >= page_end[None, :]) & req_mask[None, :], axis=1
-    )
+    # Each program handles only page_block pages.
+    page = pid * page_block + tl.arange(0, page_block)
+    page_mask = page < num_pages
+
+    owner = tl.sum((page[:, None] >= page_end[None, :]) & req_mask[None, :], axis=1)
+
     begin = tl.sum(
         tl.where(req[None, :] == owner[:, None] - 1, page_end[None, :], 0),
         axis=1,
     )
-    page_mask = page < num_pages
+
     local_page = page - begin
     page_index = owner * max_pages_per_batch + local_page
 
@@ -87,10 +93,11 @@ def make_metadata_prefill(
 
     total_pages = sum(pages_per_req)
     req_block = triton.next_power_of_2(batch_size)
-    page_block = triton.next_power_of_2(total_pages)
-    assert req_block * page_block <= 65536
 
-    _build_metadata_prefill_kernel[(1,)](
+    page_block = 256
+    num_page_blocks = ceil_div(total_pages, page_block)
+
+    _build_metadata_prefill_kernel[(num_page_blocks,)](
         seq_lens,
         num_pages_per_req,
         kv_indices,
@@ -105,8 +112,8 @@ def make_metadata_prefill(
         sink_size=sink_size,
         req_block=req_block,
         page_block=page_block,
-        num_warps=min(8, max(1, page_block // 32)),
         max_pages_per_batch=max_pages_per_batch,
+        num_warps=8,
     )
 
 

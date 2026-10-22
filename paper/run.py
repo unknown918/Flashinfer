@@ -7,6 +7,9 @@ from transformers.generation.streamers import BaseStreamer
 from .models.llama import LlamaForCausalLM
 from .models.qwen import Qwen3ForCausalLM
 
+transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
+transformers.models.qwen3.Qwen3ForCausalLM = Qwen3ForCausalLM
+
 
 class BatchTimingStreamer(BaseStreamer):
     """Measure batch TTFT and decode duration within one generate() call."""
@@ -48,6 +51,7 @@ parser.add_argument("--budget", type=int, default=2048)
 parser.add_argument("--seq-len", type=int, default=8000)
 parser.add_argument("--batch-size", type=int, default=1)
 parser.add_argument("--num-dense-layers", type=int, default=2)
+parser.add_argument("--max-new-tokens", type=int, default=100)
 args = parser.parse_args()
 
 model_path = args.model_path
@@ -56,20 +60,12 @@ budget = args.budget
 seq_len = args.seq_len
 batch_size = args.batch_size
 num_dense_layers = args.num_dense_layers
+max_new_tokens = args.max_new_tokens
 
 device = "cuda:0"
 sink_size = 4
 page_size = 32
 max_length = 32768
-max_new_tokens = 100
-
-if "Llama" in model_path:
-    transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
-elif "Qwen" in model_path:
-    transformers.models.qwen3.Qwen3ForCausalLM = Qwen3ForCausalLM
-else:
-    print("Model is not supported !")
-    exit()
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModelForCausalLM.from_pretrained(
@@ -101,8 +97,10 @@ input_ids = tokenizer.apply_chat_template(
     messages,
     add_generation_prompt=True,
     return_tensors="pt",
+    enable_thinking=False
 ).to(device)
 input_ids = input_ids.repeat(batch_size, 1).to(device)
+# assert input_ids.shape[0] >= seq_len
 
 generation_kwargs = dict(
     max_new_tokens=max_new_tokens,

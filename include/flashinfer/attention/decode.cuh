@@ -421,7 +421,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
   const uint32_t kv_len = paged_kv.get_length(batch_idx);
   const uint32_t kv_chunk_size = ceil_div(kv_len, params.o_indptr[batch_idx + 1] - params.o_indptr[batch_idx]);
   const uint32_t max_chunk_size = partition_kv ? kv_chunk_size : kv_len;
-  const uint32_t chunk_start = partition_kv ? kv_tile_idx * max_chunk_size : 0;
+  const uint32_t chunk_start = partition_kv ? min(kv_tile_idx * max_chunk_size, kv_len) : 0;
   const uint32_t chunk_end = partition_kv ? min((kv_tile_idx + 1) * max_chunk_size, kv_len) : kv_len;
   const uint32_t chunk_size = chunk_end - chunk_start;
 
@@ -565,8 +565,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
 
   const uint32_t sink_size = 4U;
   const uint32_t new_tile_size = sink_size / bdz;
-  const bool is_last_block_in_batch =
-    bx < (gridDim.x - 1) ? (params.kv_tile_indices[bx + 1] == 0 ? true : false) : true;
+  const bool is_last_block_in_batch = bx < (gridDim.x - 1) ? (params.kv_tile_indices[bx + 1] == 0 ? true : false) : true;
 
   if (is_last_block_in_batch) {
 #pragma unroll

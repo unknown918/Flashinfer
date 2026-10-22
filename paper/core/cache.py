@@ -31,7 +31,7 @@ class PagedKVCache:
         # metadata for sparse attention's kv cache
         self.sink_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
         self.seq_lens = torch.zeros(batch_size, dtype=torch.int32, device=device)
-        self.max_num_pages = batch_size * (self.max_length + page_size - 1) // page_size
+        self.max_num_pages = batch_size * ((self.max_length + page_size - 1) // page_size)
         self.kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
         self.kv_indices = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
         self.kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32, device=device)
@@ -40,33 +40,50 @@ class PagedKVCache:
         self.positions = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
         self.batch_len_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
 
-        # paged kv cache
+        # KV cache, init on cpu to avoid OOM issues
         self.paged_k_cache = torch.zeros(
             num_layers, self.max_num_pages, num_kv_heads, page_size, head_dim,
             dtype=dtype,
-            device=device
+            device="cpu",
+            pin_memory=True
+        ).contiguous()
+        self.paged_k_buffer = torch.zeros(
+            self.max_num_pages, num_kv_heads, page_size, head_dim,
+            dtype=dtype,
+            device=self.device,
         ).contiguous()
         self.paged_v_cache = torch.zeros(
             num_layers, self.max_num_pages, num_kv_heads, page_size, head_dim,
             dtype=dtype,
-            device=device
+            device=self.device,
         ).contiguous()
-        #  cache for sparse attention layers
         self.sink_k_cache = torch.zeros(
             num_layers, batch_size, num_kv_heads, sink_size, head_dim,
             dtype=dtype,
-            device=device
+            device=self.device,
         ).contiguous()
         self.sink_v_cache = torch.zeros(
             num_layers, batch_size, num_kv_heads, sink_size, head_dim,
             dtype=dtype,
-            device=device
+            device=self.device,
         ).contiguous()
         self.pooling = torch.zeros(
             num_layers, self.max_num_pages, self.num_kv_heads, self.head_dim,
             dtype=dtype,
-            device=device
+            device=self.device,
         ).contiguous()
+
+    def offload(self, layer_id: int) -> None:
+        self.paged_k_cache[layer_id].copy_(
+            self.paged_k_buffer,
+            non_blocking=True,
+        )
+
+    def onload(self, layer_id: int) -> None:
+        self.paged_k_buffer.copy_(
+            self.paged_k_cache[layer_id],
+            non_blocking=True,
+        )
 
     def update_metadata_prefill(self) -> None:
         make_metadata_prefill(
@@ -104,10 +121,12 @@ class PagedKVCache:
         )
 
     def append_page_prefill(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        self.onload(layer_id)
+        torch.cuda.synchronize()  # need immediate use, ensure k-cache is in-place
         flashinfer.append_paged_kv_cache_prefill(
             append_key=k.flatten(0, 1),
             append_value=v.flatten(0, 1),
-            paged_kv_cache=(self.paged_k_cache[layer_id], self.paged_v_cache[layer_id]),
+            paged_kv_cache=(self.paged_k_buffer, self.paged_v_cache[layer_id]),
             kv_indices=self.kv_indices,
             kv_indptr=self.kv_indptr,
             kv_last_page_len=self.kv_last_page_len,
@@ -120,6 +139,7 @@ class PagedKVCache:
             batch_len_indptr=self.batch_len_indptr,
             kv_layout="HND"
         )
+        self.offload(layer_id)
 
     def append_page_decode(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
         flashinfer.append_paged_kv_cache_decode(
@@ -145,6 +165,6 @@ class PagedKVCache:
 
         self.sink_k_cache.zero_()
         self.sink_v_cache.zero_()
-        self.paged_k_cache.zero_()
+        self.paged_k_cache = self.paged_k_cache.zero_().to("cpu")
         self.paged_v_cache.zero_()
         self.pooling.zero_()

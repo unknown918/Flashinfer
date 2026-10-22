@@ -3,8 +3,8 @@ import pytest
 import flashinfer
 import numpy as np
 from flashinfer.testing import bench_gpu_time
-from paper.core.decode import SparseDecodeWrapper, BatchDecodeWrapper
-from paper.core.utils import make_metadata_prefill, make_logits, ceil_div
+from ..core.decode import SparseDecodeWrapper, BatchDecodeWrapper
+from ..core.utils import make_metadata_prefill, make_logits, ceil_div
 
 device = "cuda:0"
 torch.manual_seed(42)
@@ -249,9 +249,9 @@ for dtype in [torch.bfloat16]:
         for max_length in [32768]:
             for head_dim in [128]:
                 for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
-                    for seq_len in [4000, 8000, 16000, 32000]:
+                    for seq_len in [8000, 16000, 32000]:
                         for batch_size in [1, 2, 4, 8]:
-                            for topk in [32, 64]:
+                            for topk in [64]:
                                 with torch.cuda.device(device):
                                     bench_sparse_decode_overhead(
                                         dtype,

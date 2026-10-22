@@ -133,7 +133,7 @@ class LlamaAttention(nn.Module):
             attn_output = self.o_proj(attn_output)
         else:  # decode
             attn_output = attn_runner.decode(q, k, v)
-            attn_output = attn_output.reshape(*input_shape, -1).contiguous()  # (1, 1, 4096)
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
 
         return attn_output, None
@@ -330,6 +330,11 @@ class LlamaModel(LlamaPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+        # prefill is last layer, load all KV cache to device memory for decode
+        if hidden_states.shape[1] > 1:
+            torch.cuda.synchronize()
+            attn_runner.cache_manager.paged_k_cache = attn_runner.cache_manager.paged_k_cache.to("cuda:0")
 
         hidden_states = self.norm(hidden_states)
 

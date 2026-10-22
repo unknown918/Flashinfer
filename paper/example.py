@@ -1,12 +1,14 @@
 import torch
 import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from .models.llama import LlamaForCausalLM
 from .models.qwen import Qwen3ForCausalLM
 
+transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 transformers.models.qwen3.Qwen3ForCausalLM = Qwen3ForCausalLM
 
-model_path = "/home1/csu_yqj/Qwen3-8B"
-prompt_path = "./paper/prompt.txt"
+model_path = "/root/autodl-tmp/Qwen3-8B"
+prompt_path = "paper/prompt.txt"
 
 device = "cuda:0"
 batch_size = 1
@@ -16,7 +18,7 @@ budget = 2048
 num_dense_layers = 2
 seq_len = 8192
 max_length = 32768
-max_new_tokens = 1000
+max_new_tokens = 100
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModelForCausalLM.from_pretrained(
