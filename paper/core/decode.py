@@ -63,7 +63,7 @@ class SparseDecodeWrapper:
             sm_scale: Optional[float] = None,
             rope_scale: Optional[float] = None,
             rope_theta: Optional[float] = None,
-            non_blocking: bool = True,
+            non_blocking: bool = False,
             q_data_type: Union[str, torch.dtype] = "float16",
             kv_data_type: Optional[Union[str, torch.dtype]] = None,
     ) -> None:
@@ -238,7 +238,7 @@ class BatchDecodeWrapper:
             sm_scale: Optional[float] = None,
             rope_scale: Optional[float] = None,
             rope_theta: Optional[float] = None,
-            non_blocking: bool = True,
+            non_blocking: bool = False,
             q_data_type: Union[str, torch.dtype] = "float16",
             kv_data_type: Optional[Union[str, torch.dtype]] = None,
     ) -> None:

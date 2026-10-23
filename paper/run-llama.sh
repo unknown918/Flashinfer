@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+export CUDA_VISIBLE_DEVICES=0
 export TRANSFORMERS_VERBOSITY=error
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export HF_HUB_VERBOSITY=error
@@ -8,10 +9,10 @@ export HF_DATASETS_DISABLE_PROGRESS_BARS=1
 export DATASETS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
 
-MODEL_PATH="/root/autodl-tmp/Qwen3-8B/"
+MODEL_PATH="$HOME/workspace/models/Llama-3.1-8B/"
 PROMPT_PATH="paper/prompt.txt"
-BATCH_SIZES=(8)
-SEQ_LENS=(8000) # 4000 8000 16000 32000
+BATCH_SIZES=(1 2 4 8)
+SEQ_LENS=(8000 16000 32000)
 BUDGETS=(2048)
 
 run_and_cleanup() {
@@ -22,9 +23,9 @@ run_and_cleanup() {
     exit_code=$?
 
     kill -TERM -- "-$pid" 2>/dev/null || true
-    sleep 1
+    sleep 10
     kill -KILL -- "-$pid" 2>/dev/null || true
-    sleep 5
+    sleep 10
 
     return "$exit_code"
 }
@@ -36,12 +37,12 @@ for seq in "${SEQ_LENS[@]}"; do
          echo "Dense Attention, with seq_len $seq and batch_size $batch_size"
          run_and_cleanup \
              python3 -m paper.run \
-             --model-path "$MODEL_PATH" \
-             --prompt-path "$PROMPT_PATH" \
-             --seq-len "$seq" \
-             --batch-size "$batch_size" \
-             --num-dense-layers 36 \
-             --max-new-tokens 100
+               --model-path "$MODEL_PATH" \
+               --prompt-path "$PROMPT_PATH" \
+               --seq-len "$seq" \
+               --batch-size "$batch_size" \
+               --num-dense-layers 32 \
+               --max-new-tokens 100
 
 
         for budget in "${BUDGETS[@]}"; do

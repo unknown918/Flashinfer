@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+
+export CUDA_VISIBLE_DEVICES=1
+export TRANSFORMERS_VERBOSITY=error
+export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+export HF_HUB_VERBOSITY=error
+export HF_HUB_DISABLE_PROGRESS_BARS=1
+export HF_DATASETS_DISABLE_PROGRESS_BARS=1
+export DATASETS_VERBOSITY=error
+export TOKENIZERS_PARALLELISM=false
+
+MODEL_PATH="$HOME/workspace/models/Qwen3-8B/"
+PROMPT_PATH="paper/prompt.txt"
+BATCH_SIZES=(1 2 4 8)
+SEQ_LENS=(8000 16000 32000) # 4000 8000 16000 32000
+BUDGETS=(2048)
+
+run_and_cleanup() {
+    setsid "$@" &
+    pid=$!
+
+    wait "$pid"
+    exit_code=$?
+
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    sleep 10
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    sleep 10
+
+    return "$exit_code"
+}
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+for seq in "${SEQ_LENS[@]}"; do
+    for batch_size in "${BATCH_SIZES[@]}"; do
+         echo "Dense Attention, with seq_len $seq and batch_size $batch_size"
+         run_and_cleanup \
+             python3 -m paper.run \
+             --model-path "$MODEL_PATH" \
+             --prompt-path "$PROMPT_PATH" \
+             --seq-len "$seq" \
+             --batch-size "$batch_size" \
+             --num-dense-layers 36 \
+             --max-new-tokens 200
+
+
+        for budget in "${BUDGETS[@]}"; do
+            echo "Sparse Attention, with seq_len $seq, budget $budget and batch_size $batch_size"
+            run_and_cleanup \
+                python3 -m paper.run \
+                  --model-path "$MODEL_PATH" \
+                  --prompt-path "$PROMPT_PATH" \
+                  --budget "$budget" \
+                  --seq-len "$seq" \
+                  --batch-size "$batch_size" \
+                  --num-dense-layers 2 \
+                  --max-new-tokens 200
+        done
+    done
+done

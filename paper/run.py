@@ -123,7 +123,7 @@ with torch.inference_mode():
         dtype=torch.bfloat16,
     )
 
-    # warmup (cuda graph capture); use the same generation shape as measurement
+    # warmup; use the same generation shape as measurement
     for _ in range(3):
         _ = model.generate(input_ids, **generation_kwargs)
         torch.cuda.synchronize()
@@ -160,8 +160,10 @@ with torch.inference_mode():
 outputs = outputs_ids[0][input_ids.shape[1]:]
 response = tokenizer.decode(outputs, skip_special_tokens=True)
 
-print("\n===== STATS =====")
-print(f"Seq Len      : {seq_len}")
-print(f"Batch size   : {batch_size}")
-print(f"Throughput   : {batch_throughput:.3f} token/s")
-print(f"TPOT         : {tpot * 1e3:.3f} ms/token")
+print(
+    "\n===== STATS =====\n"
+    f"Seq Len      : {seq_len}\n"
+    f"Batch size   : {batch_size}\n"
+    f"Throughput   : {batch_throughput:.3f} token/s\n"
+    f"TPOT         : {tpot * 1e3:.3f} ms/token\n"
+)

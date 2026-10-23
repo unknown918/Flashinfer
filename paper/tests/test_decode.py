@@ -107,7 +107,7 @@ def test_decode(
         kv_data_type=dtype,
     )
 
-    q = torch.randn(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device)
+    q = torch.randn(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
     out = torch.zeros(batch_size, num_qo_heads, head_dim, dtype=dtype, device=device).contiguous()
 
     batch_decoder.run(

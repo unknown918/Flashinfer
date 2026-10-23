@@ -3,10 +3,10 @@ import flashinfer
 import numpy as np
 from flashinfer.testing import bench_gpu_time
 from paper.core.decode import SparseDecodeWrapper
-from paper.core.utils import make_metadata_prefill, make_logits, ceil_div
+from paper.core.utils import make_metadata_prefill
 from flash_attn import flash_attn_func
 
-device = "cuda:7"
+device = "cuda:0"
 torch.manual_seed(42)
 
 
@@ -51,24 +51,12 @@ def micro_bench_sparse_decode_overhead_naive(
 
     n_pages = (seq_len - sink_size) // page_size
     tail_start = sink_size + n_pages * page_size
-    page_ids = torch.rand(batch_size, n_pages, num_qo_heads, device=device).topk(topk, dim=1).indices  # [B, topk, Hq]
+    page_ids = torch.rand(batch_size, n_pages, num_kv_heads, device=device).topk(topk, dim=1).indices
     token_ids = sink_size + (
             page_ids[:, :, None, :] * page_size +
             torch.arange(page_size, device=device)[None, None, :, None]
     ).flatten(1, 2)
     idx = token_ids[..., None].expand(-1, -1, -1, head_dim)
-
-    repeat_overhead = np.median(
-        bench_gpu_time(
-            lambda: key_states.repeat_interleave(num_qo_heads // num_kv_heads, dim=2),
-            dry_run_time_ms=100,
-            repeat_time_ms=1000,
-            use_cuda_graph=True
-        )
-    )
-
-    key_states = key_states.repeat_interleave(num_qo_heads // num_kv_heads, dim=2)
-    value_states = value_states.repeat_interleave(num_qo_heads // num_kv_heads, dim=2)
 
     k_sink = key_states[:, :sink_size, :, :]
     k_blocks = key_states.gather(1, idx)
@@ -129,7 +117,6 @@ def micro_bench_sparse_decode_overhead_naive(
     torch.cuda.synchronize()
 
     print("=" * 10, "Naive Sparse", "=" * 10)
-    print(f"Repeat KV: {repeat_overhead * 1e3:.3f}us")
     print(f"Concat: {concat_overhead * 1e3:.3f}us")
     print(f"Attention: {attn_overhead * 1e3:.3f}us")
 
@@ -230,84 +217,58 @@ def micro_bench_sparse_decode_overhead(
         )
     )
 
-    # simulated data has problem with topk, need manually construct logits
-    # num_pages = ceil_div(seq_len - sink_size, page_size)
-    # logits[:, :num_pages] = make_logits(batch_size * num_qo_heads, num_pages, dtype=dtype, device=device)
-    # logits.contiguous()
-    num_pages_per_req.sub_(1)
-
-    sparse_indptr = torch.load(
-        f"../data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indptr_2.pt",
-        map_location=device,
-        weights_only=True
-    )
-    sparse_indices = torch.load(
-        f"../data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indices_2.pt",
-        map_location=device,
-        weights_only=True
-    )
-    kv_last_page_len = torch.load(
-        f"../data/{seq_len}/{batch_size}/{topk * page_size}/kv_last_page_len_2.pt",
-        map_location=device,
-        weights_only=True
-    )
-
-    # expand top-k token's indices
-    # topk_overhead = np.median(
-    #     bench_gpu_time(
-    #         lambda: flashinfer.topk_bool_mask_logits(
-    #             logits=logits,
-    #             mask_logits=mask_logits,
-    #             indptr=kv_indptr,
-    #             indices=kv_indices,
-    #             sparse_indptr=sparse_indptr,
-    #             sparse_indices=sparse_indices,
-    #             top_k=topk,
-    #             group_size=group_size,
-    #             num_pages_per_req=num_pages_per_req,
-    #             is_bench=True
-    #         ),
-    #         dry_run_time_ms=100,
-    #         repeat_time_ms=1000,
-    #         use_cuda_graph=True,
-    #     )
-    # )
-
-    sparse_decoder.plan(
-        kv_indptr=sparse_indptr,
-        page_size=page_size,
-        num_qo_heads=num_qo_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        q_data_type=dtype,
-        kv_data_type=dtype
-    )
-
-    sparse_attention_overhead = np.median(
-        bench_gpu_time(
-            lambda: sparse_decoder.run(
-                q=q,
-                paged_k_cache=paged_k_cache,
-                paged_v_cache=paged_v_cache,
-                sink_k_cache=sink_k_cache,
-                sink_v_cache=sink_v_cache,
-                kv_indptr=sparse_indptr,
-                kv_indices=sparse_indices,
-                kv_last_page_len=kv_last_page_len,
-                out=sparse_output,
-                kv_layout="HND",
-            ),
-            dry_run_time_ms=100,
-            repeat_time_ms=1000,
-            use_cuda_graph=True,
+    sparse_attention_overhead = 0
+    for i in range(2, 32):
+        sparse_indptr = torch.load(
+            f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indptr_{i}.pt",
+            map_location=device,
+            weights_only=True
         )
-    )
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+        sparse_indices = torch.load(
+            f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indices_{i}.pt",
+            map_location=device,
+            weights_only=True
+        )
+        kv_last_page_len = torch.load(
+            f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/kv_last_page_len_{i}.pt",
+            map_location=device,
+            weights_only=True
+        )
+
+        sparse_decoder.plan(
+            kv_indptr=sparse_indptr,
+            page_size=page_size,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            q_data_type=dtype,
+            kv_data_type=dtype
+        )
+
+        sparse_attention_overhead += np.median(
+            bench_gpu_time(
+                lambda: sparse_decoder.run(
+                    q=q,
+                    paged_k_cache=paged_k_cache,
+                    paged_v_cache=paged_v_cache,
+                    sink_k_cache=sink_k_cache,
+                    sink_v_cache=sink_v_cache,
+                    kv_indptr=sparse_indptr,
+                    kv_indices=sparse_indices,
+                    kv_last_page_len=kv_last_page_len,
+                    out=sparse_output,
+                    kv_layout="HND",
+                ),
+                dry_run_time_ms=100,
+                repeat_time_ms=1000,
+                use_cuda_graph=True,
+            )
+        )
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     print("=" * 10, "Ours Sparse", "=" * 10)
     print(f"Estimate: {estimate_overhead * 1e3:.3f}us")
-    # print(f"Fused Selection: {topk_overhead * 1e3 - 4:.3f}us")
     print(f"Sparse Attn: {sparse_attention_overhead * 1e3:.3f}")
 
 

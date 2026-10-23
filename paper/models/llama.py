@@ -332,9 +332,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
         # prefill is last layer, load all KV cache to device memory for decode
-        if hidden_states.shape[1] > 1:
-            torch.cuda.synchronize()
-            attn_runner.cache_manager.paged_k_cache = attn_runner.cache_manager.paged_k_cache.to("cuda:0")
+        # if hidden_states.shape[1] > 1:
+        #     torch.cuda.synchronize()
+        #     attn_runner.cache_manager.paged_k_cache = attn_runner.cache_manager.paged_k_cache.to("cuda:0")
 
         hidden_states = self.norm(hidden_states)
 

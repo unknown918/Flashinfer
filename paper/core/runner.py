@@ -147,7 +147,12 @@ class AttentionRunner:
         self.cache_manager.append_page_prefill(self.layer_id, k, v)
 
         # no sparsity for prefill
-        return flash_attn_func(q=q, k=k, v=v, causal=True)
+        return flash_attn_func(
+            q=q,
+            k=k,
+            v=v,
+            causal=True
+        )
 
     def decode(
             self,
@@ -169,6 +174,21 @@ class AttentionRunner:
             ).copy_(self.cache_manager.kv_last_page_len[:, None])
             self.num_pages_per_req.copy_(self.cache_manager.num_pages_per_req)
             self.num_pages_per_req.sub_(1)  # last page is manually selected
+            # streamingLLM metadata
+            # self.sparse_indptr = torch.full(
+            #     (self.batch_size + 1,), self.topk,
+            #     dtype=torch.int32,
+            #     device=self.device
+            # )
+            # self.sparse_indptr[0] = 0
+            # torch.cumsum(self.sparse_indptr, dim=0, out=self.sparse_indptr)
+            # self.sparse_indices = torch.zeros(
+            #     self.batch_size * self.topk,
+            #     dtype=torch.int32,
+            #     device=self.device
+            # )
+            # for i in range(self.batch_size):
+            #     self.sparse_indices[i * self.topk: (i + 1) * self.topk] = self.cache_manager.kv_indices[i * self.topk:i * self.topk + self.topk]
 
         if is_qwen:
             q, k = self.rope.apply_rope_qwen(q, k)
@@ -192,6 +212,20 @@ class AttentionRunner:
                 kv_layout="HND",
             )
             return self.output
+
+        # StreamingLLM
+        # self.dense_decoder.run(
+        #     q=self.q,
+        #     paged_k_cache=self.cache_manager.paged_k_cache[self.layer_id],
+        #     paged_v_cache=self.cache_manager.paged_v_cache[self.layer_id],
+        #     sink_k_cache=self.cache_manager.sink_k_cache[self.layer_id],
+        #     sink_v_cache=self.cache_manager.sink_v_cache[self.layer_id],
+        #     kv_indptr=self.sparse_indptr,
+        #     kv_indices=self.sparse_indices,
+        #     kv_last_page_len=self.cache_manager.kv_last_page_len,
+        #     out=self.output,
+        #     kv_layout="HND",
+        # )
 
         g = self.graphs[self.layer_id - self.num_dense_layers]
         if not self.graph_captured[self.layer_id - self.num_dense_layers]:

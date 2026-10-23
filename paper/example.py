@@ -7,16 +7,16 @@ from .models.qwen import Qwen3ForCausalLM
 transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 transformers.models.qwen3.Qwen3ForCausalLM = Qwen3ForCausalLM
 
-model_path = "/root/autodl-tmp/Qwen3-8B"
+model_path = "/hpc2hdd/home/qyang284/workspace/models/Llama-3.1-8B"
 prompt_path = "paper/prompt.txt"
 
 device = "cuda:0"
-batch_size = 1
+batch_size = 4
 sink_size = 4
 page_size = 32
 budget = 2048
 num_dense_layers = 2
-seq_len = 8192
+seq_len = 8000
 max_length = 32768
 max_new_tokens = 100
 
@@ -79,7 +79,7 @@ with torch.inference_mode():
 
     model.ss_flush()
 
-new_tokens = outputs[0][input_ids.shape[1]:]
+new_tokens = outputs[-1][input_ids.shape[1]:]
 response = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 print(f"Response:\n {response}")

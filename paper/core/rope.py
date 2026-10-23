@@ -1,6 +1,6 @@
 import torch
 import flashinfer
-from typing import Tuple
+from typing import Tuple, Union
 
 
 class RoPE:
@@ -11,7 +11,7 @@ class RoPE:
             rope_theta: float,
             low_freq_factor: float,
             high_freq_factor: float,
-            device: str,
+            device: Union[str, torch.device],
     ):
         self.batch_size = batch_size
         self.rope_scale = rope_scale
