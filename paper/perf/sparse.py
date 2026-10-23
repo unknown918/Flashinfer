@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from flashinfer.testing import bench_gpu_time
 from ..core.decode import SparseDecodeWrapper
-from ..core.utils import make_metadata_prefill, assert_close
+from ..core.utils import make_metadata_prefill
 
 device = "cuda:0"
 torch.manual_seed(42)
@@ -24,9 +24,9 @@ def bench_sparse_decode(
         seq_len,
 ):
     if topk * page_size >= seq_len - sink_size:
-        pytest.skip(f"invalid case: topk * page_size = {topk * page_size} >= {seq_len - sink_size}")
+        return
     if seq_len > max_length:
-        pytest.skip(f"invalid case: seq_len {seq_len} >= max_length {max_length}")
+        return
 
     seq_lens = torch.zeros(batch_size, dtype=torch.int32, device=device).contiguous()
     seq_lens.fill_(seq_len)
@@ -92,18 +92,12 @@ def bench_sparse_decode(
     sparse_decoder_ = SparseDecodeWrapper(float_workspace_buffer=workspace_buffer_)
 
     sparse_proxy_indptr = torch.full(
-        (batch_size * num_kv_heads + 1,), topk * page_size,
+        (batch_size * num_kv_heads + 1,), topk,
         dtype=torch.int32,
         device=device
     )
     sparse_proxy_indptr[0] = 0
     torch.cumsum(sparse_proxy_indptr, dim=0, out=sparse_proxy_indptr)
-
-    # sparse_proxy_indptr = torch.load(
-    #     f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indptr_2.pt",
-    #     map_location=device,
-    #     weights_only=True
-    # )
 
     sparse_decoder_.plan(
         kv_indptr=sparse_proxy_indptr,
@@ -187,9 +181,7 @@ def bench_sparse_decode(
                 use_cuda_graph=True
             )
         )
-        
-        # assert_close(sparse_output_, sparse_output)
-        
+
         sparse_output_.zero_()
         sparse_output_.zero_()
 
@@ -203,7 +195,7 @@ def bench_sparse_decode(
         print(f"Sparse Decode Overhead w/o schedule: {decode_overhead_ * 1e3:.3f} us")
         output_dir = Path(f"paper/data/schedule/{str(batch_size)}/{str(topk * page_size)}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         torch.save(
             torch.tensor(optimal_times, dtype=torch.float32),
             output_dir / "optimal.pt",
@@ -220,7 +212,7 @@ for dtype in [torch.bfloat16]:
             for head_dim in [128]:
                 for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
                     for batch_size in [8]:
-                        for topk in [32, 64]:
+                        for topk in [64]:
                             for num_layers in [32]:
                                 for seq_len in [32044]:
                                     with torch.cuda.device(device):

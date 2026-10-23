@@ -43,7 +43,7 @@ def _build_metadata_prefill_kernel(
 
     # Each program handles only page_block pages.
     page = pid * page_block + tl.arange(0, page_block)
-    page_mask = page < num_pages
+    page_mask = (page < num_pages) & (page < tl.sum(tl.where(req_mask, pages, 0), axis=0))
 
     owner = tl.sum((page[:, None] >= page_end[None, :]) & req_mask[None, :], axis=1)
 
@@ -84,18 +84,11 @@ def make_metadata_prefill(
 
     max_pages_per_batch = kv_indices.numel() // batch_size
 
-    pages_per_req = [
-        ceil_div(int(seq_len) - sink_size, page_size)
-        for seq_len in seq_lens
-    ]
-    assert min(pages_per_req) >= 0
-    assert max(pages_per_req) <= max_pages_per_batch
-
-    total_pages = sum(pages_per_req)
     req_block = triton.next_power_of_2(batch_size)
 
+    # Launch over capacity; the kernel masks unused pages without a CPU readback.
     page_block = 256
-    num_page_blocks = ceil_div(total_pages, page_block)
+    num_page_blocks = ceil_div(kv_indices.numel(), page_block)
 
     _build_metadata_prefill_kernel[(num_page_blocks,)](
         seq_lens,
@@ -107,13 +100,46 @@ def make_metadata_prefill(
         positions,
         batch_len_indptr,
         num_req=batch_size,
-        num_pages=total_pages,
+        num_pages=kv_indices.numel(),
         page_size=page_size,
         sink_size=sink_size,
         req_block=req_block,
         page_block=page_block,
         max_pages_per_batch=max_pages_per_batch,
         num_warps=8,
+    )
+
+
+@triton.jit
+def _make_streaming_metadata_kernel(
+        num_pages_per_req, kv_indptr, kv_indices,
+        batch_size: tl.constexpr, topk: tl.constexpr,
+        max_pages_per_req: tl.constexpr,
+        req_block: tl.constexpr, page_block: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    req = tl.arange(0, req_block)
+    pages = tl.load(num_pages_per_req + req, mask=req < batch_size, other=0)
+    counts = tl.minimum(pages, topk)
+    begin = tl.sum(tl.where(req < pid, counts, 0), axis=0)
+    count = tl.sum(tl.where(req == pid, counts, 0), axis=0)
+    num_pages = tl.sum(tl.where(req == pid, pages, 0), axis=0)
+    tl.store(kv_indptr + pid, begin)
+    if pid == batch_size - 1:
+        tl.store(kv_indptr + batch_size, begin + count)
+    page = tl.arange(0, page_block)
+    # Each request owns a fixed cache region; select its most recent pages.
+    tl.store(kv_indices + begin + page,
+             pid * max_pages_per_req + num_pages - count + page,
+             mask=page < count)
+
+
+def make_streaming_metadata(num_pages_per_req, kv_indptr, kv_indices, topk, max_pages_per_req):
+    batch_size = num_pages_per_req.numel()
+    _make_streaming_metadata_kernel[(batch_size,)](
+        num_pages_per_req, kv_indptr, kv_indices,
+        batch_size, topk, max_pages_per_req,
+        triton.next_power_of_2(batch_size), triton.next_power_of_2(topk),
     )
 
 

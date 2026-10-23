@@ -56,6 +56,18 @@ for seq in "${SEQ_LENS[@]}"; do
                   --batch-size "$batch_size" \
                   --num-dense-layers 2 \
                   --max-new-tokens 100
+
+            echo "StreamingLLM Attention, with seq_len $seq, budget $budget and batch_size $batch_size"
+            run_and_cleanup \
+                python3 -m paper.run \
+                  --model-path "$MODEL_PATH" \
+                  --prompt-path "$PROMPT_PATH" \
+                  --budget "$budget" \
+                  --seq-len "$seq" \
+                  --batch-size "$batch_size" \
+                  --num-dense-layers 2 \
+                  --max-new-tokens 100 \
+                  --streaming
         done
     done
 done

@@ -12,7 +12,7 @@ export TOKENIZERS_PARALLELISM=false
 MODEL_PATH="$HOME/workspace/models/Qwen3-8B/"
 PROMPT_PATH="paper/prompt.txt"
 BATCH_SIZES=(1 2 4 8)
-SEQ_LENS=(8000 16000 32000) # 4000 8000 16000 32000
+SEQ_LENS=(8000 16000 32000)
 BUDGETS=(2048)
 
 run_and_cleanup() {
@@ -42,7 +42,7 @@ for seq in "${SEQ_LENS[@]}"; do
              --seq-len "$seq" \
              --batch-size "$batch_size" \
              --num-dense-layers 36 \
-             --max-new-tokens 200
+             --max-new-tokens 100
 
 
         for budget in "${BUDGETS[@]}"; do
@@ -55,7 +55,19 @@ for seq in "${SEQ_LENS[@]}"; do
                   --seq-len "$seq" \
                   --batch-size "$batch_size" \
                   --num-dense-layers 2 \
-                  --max-new-tokens 200
+                  --max-new-tokens 100
+
+            echo "StreamingLLM Attention, with seq_len $seq, budget $budget and batch_size $batch_size"
+            run_and_cleanup \
+                python3 -m paper.run \
+                  --model-path "$MODEL_PATH" \
+                  --prompt-path "$PROMPT_PATH" \
+                  --budget "$budget" \
+                  --seq-len "$seq" \
+                  --batch-size "$batch_size" \
+                  --num-dense-layers 2 \
+                  --max-new-tokens 100 \
+                  --streaming
         done
     done
 done

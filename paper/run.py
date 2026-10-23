@@ -1,9 +1,9 @@
 import time
+import statistics
 import torch
 import argparse
 import transformers
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers.generation.streamers import BaseStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
 from .models.llama import LlamaForCausalLM
 from .models.qwen import Qwen3ForCausalLM
 
@@ -11,37 +11,37 @@ transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 transformers.models.qwen3.Qwen3ForCausalLM = Qwen3ForCausalLM
 
 
-class BatchTimingStreamer(BaseStreamer):
-    """Measure batch TTFT and decode duration within one generate() call."""
+class BatchTimingCriteria(StoppingCriteria):
+    """Record token boundaries without copying every token to the CPU."""
 
-    def __init__(self, device):
+    def __init__(self, device, runner):
         self.device = torch.device(device)
-        self._prompt_seen = False
-        self.start_time = None
-        self.first_token_time = None
-        self.end_time = None
-
-    def _sync(self):
-        torch.cuda.synchronize(self.device)
+        self.runner = runner
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.first_token_event = torch.cuda.Event(enable_timing=True)
+        self.decode_start_event = torch.cuda.Event(enable_timing=True)
+        self.end_event = torch.cuda.Event(enable_timing=True)
+        self.token_count = 0
 
     def start(self):
-        self._sync()
+        torch.cuda.synchronize(self.device)
         self.start_time = time.perf_counter()
+        self.start_event.record(torch.cuda.current_stream(self.device))
 
-    def put(self, value):
-        # The first put() contains the prompt for the whole batch.
-        if not self._prompt_seen:
-            self._prompt_seen = True
-            return
-
-        # The next put() corresponds to the first generated token for the batch.
-        if self.first_token_time is None:
-            self._sync()
-            self.first_token_time = time.perf_counter()
+    def __call__(self, input_ids, scores, **kwargs):
+        if self.token_count == 0:
+            self.first_token_event.record(torch.cuda.current_stream(self.device))
+            # Restore KV and recapture before the TPOT boundary, after prefill
+            # activations have been released. Wall time still includes setup.
+            self.runner.prepare_decode()
+            self.decode_start_event.record(torch.cuda.current_stream(self.device))
+        self.token_count += 1
+        return False
 
     def end(self):
-        self._sync()
-        self.end_time = time.perf_counter()
+        self.end_event.record(torch.cuda.current_stream(self.device))
+        self.end_event.synchronize()
+        self.wall_time = time.perf_counter() - self.start_time
 
 
 parser = argparse.ArgumentParser()
@@ -52,6 +52,7 @@ parser.add_argument("--seq-len", type=int, default=8000)
 parser.add_argument("--batch-size", type=int, default=1)
 parser.add_argument("--num-dense-layers", type=int, default=2)
 parser.add_argument("--max-new-tokens", type=int, default=100)
+parser.add_argument("--streaming", action="store_true")
 args = parser.parse_args()
 
 model_path = args.model_path
@@ -122,6 +123,10 @@ with torch.inference_mode():
         num_dense_layers=num_dense_layers,
         dtype=torch.bfloat16,
     )
+    model.attn_runner.streaming = args.streaming
+    if seq_len == 32000 and batch_size == 8:
+        # spare room for activation
+        model.attn_runner.cache_manager.enable_prefill_offload()
 
     # warmup; use the same generation shape as measurement
     for _ in range(3):
@@ -129,32 +134,28 @@ with torch.inference_mode():
         torch.cuda.synchronize()
         model.ss_flush()
 
-    # Measure TTFT and TPOT in the same generation call.
-    model.ss_flush()
-    torch.cuda.synchronize()
+    timings = []
+    for _ in range(3):
+        model.ss_flush()
+        timer = BatchTimingCriteria(device, model.attn_runner)
+        timer.start()
+        outputs_ids = model.generate(
+            input_ids,
+            stopping_criteria=StoppingCriteriaList([timer]),
+            **generation_kwargs,
+        )
+        timer.end()
 
-    timer = BatchTimingStreamer(device)
-    timer.start()
+        generated_length = outputs_ids.shape[1] - input_ids.shape[1]
+        assert generated_length == max_new_tokens
+        assert timer.token_count == generated_length
+        ttft = timer.start_event.elapsed_time(timer.first_token_event) / 1e3
+        decode_time = timer.decode_start_event.elapsed_time(timer.end_event) / 1e3
+        timings.append((ttft, decode_time, timer.wall_time))
 
-    outputs_ids = model.generate(
-        input_ids,
-        streamer=timer,
-        **generation_kwargs,
-    )
-
-    torch.cuda.synchronize()
-
-    if timer.first_token_time is None or timer.end_time is None:
-        raise RuntimeError("The streamer did not receive generated tokens correctly.")
-
-    generated_length = outputs_ids.shape[1] - input_ids.shape[1]
-    assert generated_length == max_new_tokens
-
-    ttft = timer.first_token_time - timer.start_time
-    decode_time = timer.end_time - timer.first_token_time
-    tpot = decode_time / (generated_length - 1)
-    batch_throughput = batch_size * (generated_length - 1) / decode_time
-
+    tpot_samples = [decode / (max_new_tokens - 1) for _, decode, _ in timings]
+    tpot = statistics.median(tpot_samples)
+    batch_throughput = batch_size / tpot
     model.ss_flush()
 
 outputs = outputs_ids[0][input_ids.shape[1]:]

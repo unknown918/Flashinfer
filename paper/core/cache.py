@@ -1,7 +1,7 @@
 import torch
 import flashinfer
 from .utils import make_metadata_prefill
-from typing import Optional, Union
+from typing import Union
 
 
 class PagedKVCache:
@@ -27,6 +27,7 @@ class PagedKVCache:
         self.max_length = max_length
         self.device = device
         self.dtype = dtype
+        self.prefill_offload = False
 
         # metadata for sparse attention's kv cache
         self.sink_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
@@ -67,17 +68,23 @@ class PagedKVCache:
             device=self.device,
         ).contiguous()
 
-    # def offload(self, layer_id: int) -> None:
-    #     self.paged_k_cache[layer_id].copy_(
-    #         self.paged_k_buffer,
-    #         non_blocking=True,
-    #     )
-    #
-    # def onload(self, layer_id: int) -> None:
-    #     self.paged_k_buffer.copy_(
-    #         self.paged_k_cache[layer_id],
-    #         non_blocking=True,
-    #     )
+    def enable_prefill_offload(self) -> None:
+        self.cpu_k_cache = torch.empty_like(self.paged_k_cache, device="cpu", pin_memory=True)
+        self.cpu_v_cache = torch.empty_like(self.paged_v_cache, device="cpu", pin_memory=True)
+        self.paged_k_cache = self.cpu_k_cache
+        self.paged_v_cache = self.cpu_v_cache
+        self.prefill_offload = True
+
+    def begin_prefill(self) -> None:
+        self.paged_k_cache = self.cpu_k_cache
+        self.paged_v_cache = self.cpu_v_cache
+        self.paged_k_buffer = torch.empty_like(self.cpu_k_cache[0], device=self.device)
+        self.paged_v_buffer = torch.empty_like(self.cpu_v_cache[0], device=self.device)
+
+    def restore(self) -> None:
+        self.paged_k_buffer = self.paged_v_buffer = None
+        self.paged_k_cache = self.cpu_k_cache.to(self.device, non_blocking=True)
+        self.paged_v_cache = self.cpu_v_cache.to(self.device, non_blocking=True)
 
     def update_metadata_prefill(self) -> None:
         make_metadata_prefill(
@@ -115,12 +122,16 @@ class PagedKVCache:
         )
 
     def append_page_prefill(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
-        # self.onload(layer_id)
-        # torch.cuda.synchronize()  # need immediate use, ensure k-cache is in-place
+        if self.prefill_offload:
+            self.paged_k_buffer.zero_()
+            self.paged_v_buffer.zero_()
+            kv_cache = (self.paged_k_buffer, self.paged_v_buffer)
+        else:
+            kv_cache = (self.paged_k_cache[layer_id], self.paged_v_cache[layer_id])
         flashinfer.append_paged_kv_cache_prefill(
             append_key=k.flatten(0, 1),
             append_value=v.flatten(0, 1),
-            paged_kv_cache=(self.paged_k_cache[layer_id], self.paged_v_cache[layer_id]),
+            paged_kv_cache=kv_cache,
             kv_indices=self.kv_indices,
             kv_indptr=self.kv_indptr,
             kv_last_page_len=self.kv_last_page_len,
@@ -133,7 +144,10 @@ class PagedKVCache:
             batch_len_indptr=self.batch_len_indptr,
             kv_layout="HND"
         )
-        # self.offload(layer_id)
+        if self.prefill_offload:
+            # blocking cop: finish before the staging buffers are reused.
+            self.cpu_k_cache[layer_id].copy_(self.paged_k_buffer)
+            self.cpu_v_cache[layer_id].copy_(self.paged_v_buffer)
 
     def append_page_decode(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
         flashinfer.append_paged_kv_cache_decode(
@@ -159,6 +173,10 @@ class PagedKVCache:
 
         self.sink_k_cache.zero_()
         self.sink_v_cache.zero_()
-        self.paged_k_cache.zero_()
-        self.paged_v_cache.zero_()
+        if self.prefill_offload:
+            self.paged_k_cache = self.cpu_k_cache
+            self.paged_v_cache = self.cpu_v_cache
+        else:
+            self.paged_k_cache.zero_()
+            self.paged_v_cache.zero_()
         self.pooling.zero_()

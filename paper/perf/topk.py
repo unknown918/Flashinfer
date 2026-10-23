@@ -57,7 +57,6 @@ def bench_topk(
     ref_indptr = torch.zeros(batch_size * num_kv_heads + 1, dtype=torch.int32, device=device)
 
     def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
-        torch_union_overhead = 0.0
         page_topk = torch.topk(_logits[:, :-1], k=topk).indices
 
         torch_union_overhead = np.median(
@@ -67,7 +66,7 @@ def bench_topk(
                 repeat_time_ms=1000,
             )
         )
-        
+
         page_topk = page_topk.reshape(num_kv_heads, group_size, -1)
         _indices = kv_indices[kv_indptr[batch_id]: kv_indptr[batch_id + 1]]
 
@@ -90,6 +89,7 @@ def bench_topk(
 
         return ref_indptr, ref_indices, torch_union_overhead
 
+    torch_union_overhead = 0.0
     for batch_idx, seq_len in enumerate(seq_lens):
         seq_len = int(seq_len) - sink_size
         logits_ = make_logits(
@@ -171,16 +171,16 @@ for dtype in [torch.bfloat16]:
             for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
                 for batch_size in [8]:
                     for topk in [8, 16, 32, 64]:
-                            for seq_len in [4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000]:
-                                with torch.cuda.device(device):
-                                    bench_topk(
-                                        dtype,
-                                        topk,
-                                        page_size,
-                                        max_length,
-                                        batch_size,
-                                        num_kv_heads,
-                                        num_qo_heads,
-                                        sink_size,
-                                        seq_len
-                                    )
+                        for seq_len in [4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000]:
+                            with torch.cuda.device(device):
+                                bench_topk(
+                                    dtype,
+                                    topk,
+                                    page_size,
+                                    max_length,
+                                    batch_size,
+                                    num_kv_heads,
+                                    num_qo_heads,
+                                    sink_size,
+                                    seq_len
+                                )
