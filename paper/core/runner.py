@@ -5,7 +5,7 @@ from .utils import ceil_div, make_streaming_metadata
 from .rope import RoPE
 from .cache import PagedKVCache
 from .decode import BatchDecodeWrapper, SparseDecodeWrapper
-from flash_attn import flash_attn_func
+from flash_attn_3.flash_attn_interface import flash_attn_func
 
 
 class AttentionRunner:

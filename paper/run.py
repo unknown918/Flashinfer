@@ -12,8 +12,6 @@ transformers.models.qwen3.Qwen3ForCausalLM = Qwen3ForCausalLM
 
 
 class BatchTimingCriteria(StoppingCriteria):
-    """Record token boundaries without copying every token to the CPU."""
-
     def __init__(self, device, runner):
         self.device = torch.device(device)
         self.runner = runner

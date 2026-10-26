@@ -5,7 +5,7 @@ from flashinfer.testing import bench_gpu_time
 from ..core.decode import SparseDecodeWrapper, BatchDecodeWrapper
 from ..core.utils import make_metadata_prefill, make_logits, ceil_div
 
-device = "cuda:1"
+device = "cuda:0"
 torch.manual_seed(42)
 
 
@@ -181,17 +181,17 @@ def bench_sparse_decode_overhead(
     sparse_attention_overhead = 0
     for i in range(2, 32):
         sparse_indptr = torch.load(
-            f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indptr_{i}.pt",
+            f"paper/data/8045/{batch_size}/{topk * page_size}/sparse_indptr_{i}.pt",
             map_location=device,
             weights_only=True
         )
         sparse_indices = torch.load(
-            f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/sparse_indices_{i}.pt",
+            f"paper/data/8045/{batch_size}/{topk * page_size}/sparse_indices_{i}.pt",
             map_location=device,
             weights_only=True
         )
         kv_last_page_len = torch.load(
-            f"paper/data/{seq_len}/{batch_size}/{topk * page_size}/kv_last_page_len_{i}.pt",
+            f"paper/data/8045/{batch_size}/{topk * page_size}/kv_last_page_len_{i}.pt",
             map_location=device,
             weights_only=True
         )
@@ -246,9 +246,9 @@ for dtype in [torch.bfloat16]:
         for max_length in [32768]:
             for head_dim in [128]:
                 for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
-                    for seq_len in [32044]: # [8045, 16045, 32044]:
+                    for seq_len in [8045, 16045, 32044]:
                         for batch_size in [8]:
-                            for topk in [64]:
+                            for topk in [32]:
                                 with torch.cuda.device(device):
                                     bench_sparse_decode_overhead(
                                         dtype,

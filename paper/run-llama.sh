@@ -9,7 +9,7 @@ export HF_DATASETS_DISABLE_PROGRESS_BARS=1
 export DATASETS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
 
-MODEL_PATH="$HOME/workspace/models/Llama-3.1-8B/"
+MODEL_PATH="$HOME/code/models/Llama-3.1-8B/"
 PROMPT_PATH="paper/prompt.txt"
 BATCH_SIZES=(1 2 4 8)
 SEQ_LENS=(8000 16000 32000)

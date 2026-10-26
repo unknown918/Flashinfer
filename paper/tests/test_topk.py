@@ -11,10 +11,10 @@ torch.manual_seed(42)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("topk", [8, 15, 16, 32, 64])
 @pytest.mark.parametrize("page_size", [32])
-@pytest.mark.parametrize("max_length", [32768])
+@pytest.mark.parametrize("max_length", [32768, 131072])
 @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("num_kv_heads, num_qo_heads, sink_size", [(8, 32, 4)])
-@pytest.mark.parametrize("seq_len", [8000, 16000, 32000])
+@pytest.mark.parametrize("seq_len", [8000, 16000, 32000, 64000, 128000])
 def test_topk_bool_mask_logits(
         dtype,
         topk,

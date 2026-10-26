@@ -4,7 +4,7 @@ import numpy as np
 from flashinfer.testing import bench_gpu_time
 from paper.core.decode import SparseDecodeWrapper
 from paper.core.utils import make_metadata_prefill
-from flash_attn import flash_attn_func
+from flash_attn_3.flash_attn_interface import flash_attn_func
 
 device = "cuda:0"
 torch.manual_seed(42)
@@ -37,7 +37,6 @@ def micro_bench_sparse_decode_overhead_naive(
                 query_states,
                 key_states,
                 value_states,
-                dropout_p=0.0,
                 causal=True
             ),
             dry_run_time_ms=100,
@@ -98,13 +97,14 @@ def micro_bench_sparse_decode_overhead_naive(
         dim=1
     ).contiguous()
 
+    k = k.repeat_interleave(num_qo_heads // num_kv_heads, dim=2)
+    v = v.repeat_interleave(num_qo_heads // num_kv_heads, dim=2)
     attn_overhead = np.median(
         bench_gpu_time(
             lambda: flash_attn_func(
                 query_states,
                 k,
                 v,
-                dropout_p=0.0,
                 causal=True
             ),
             dry_run_time_ms=100,
@@ -267,6 +267,7 @@ def micro_bench_sparse_decode_overhead(
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+    sparse_attention_overhead /= 30
     print("=" * 10, "Ours Sparse", "=" * 10)
     print(f"Estimate: {estimate_overhead * 1e3:.3f}us")
     print(f"Sparse Attn: {sparse_attention_overhead * 1e3:.3f}")

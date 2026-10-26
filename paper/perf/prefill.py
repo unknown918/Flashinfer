@@ -107,7 +107,7 @@ def bench_batch_prefill(
 
     ragged_out = torch.empty_like(q)
 
-    sink_ms = np.median(
+    composed_ms = np.median(
         bench_gpu_time(
             lambda: sink_wrapper.run(
                 q,
@@ -138,8 +138,8 @@ def bench_batch_prefill(
 
     print(f"Batch Size: {batch_size}, SeqLen: {seq_len}")
     print(f"Batch Prefill: {ragged_ms:.3f} ms")
-    print(f"Sink Prefill: {sink_ms:.3f} ms")
-    print(f"SpeedUp: {ragged_ms / sink_ms:.2f}x")
+    print(f"Composed Prefill: {composed_ms:.3f} ms")
+    print(f"Speed Up: {ragged_ms / composed_ms:.2f}x")
     print("=" * 20)
 
 
@@ -149,8 +149,8 @@ if __name__ == "__main__":
             for max_length in [32768]:
                 for head_dim in [128]:
                     for num_kv_heads, num_qo_heads, sink_size in [(8, 32, 4)]:
-                        for seq_len in [4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000]:
-                            for batch_size in [1, 2, 4, 8]:
+                        for seq_len in [32000]:
+                            for batch_size in [8]:
                                 bench_batch_prefill(
                                     seq_len=seq_len,
                                     batch_size=batch_size,

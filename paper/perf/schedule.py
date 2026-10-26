@@ -31,7 +31,6 @@ def bench_sparse_decode(
     seq_lens = torch.zeros(batch_size, dtype=torch.int32, device=device).contiguous()
     seq_lens.fill_(seq_len)
     nnz = int(seq_lens.sum())
-    group_size = num_qo_heads // num_kv_heads
     max_num_pages = max_length // page_size
     total_pages = batch_size * max_num_pages
 
@@ -92,7 +91,7 @@ def bench_sparse_decode(
     sparse_decoder_ = SparseDecodeWrapper(float_workspace_buffer=workspace_buffer_)
 
     sparse_proxy_indptr = torch.full(
-        (batch_size * num_kv_heads + 1,), topk,
+        (batch_size * num_kv_heads + 1,), 180,
         dtype=torch.int32,
         device=device
     )
@@ -162,6 +161,8 @@ def bench_sparse_decode(
             )
         )
 
+        torch.cuda.empty_cache()
+
         decode_overhead_ = np.median(
             bench_gpu_time(
                 lambda: sparse_decoder_.run(
@@ -211,8 +212,8 @@ for dtype in [torch.bfloat16]:
         for max_length in [32768]:
             for head_dim in [128]:
                 for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
-                    for batch_size in [8]:
-                        for topk in [64]:
+                    for batch_size in [1, 2, 4, 8]:
+                        for topk in [32, 64]:
                             for num_layers in [32]:
                                 for seq_len in [32044]:
                                     with torch.cuda.device(device):

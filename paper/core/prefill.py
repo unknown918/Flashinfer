@@ -28,15 +28,18 @@ class BatchPrefillWrapper:
         page_workspace = torch.empty(work_space_bytes, dtype=torch.uint8, device=device)
         self.sink_causal_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             sink_causal_workspace,
-            kv_layout=kv_layout
+            kv_layout=kv_layout,
+            backend="fa3"
         )
         self.sink_noncausal_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             sink_noncausal_workspace,
             kv_layout=kv_layout,
+            backend="fa3"
         )
         self.page_causal_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             page_workspace,
             kv_layout=kv_layout,
+            backend="fa3"
         )
 
     def plan(
