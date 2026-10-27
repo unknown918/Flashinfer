@@ -58,12 +58,13 @@ def bench_topk(
 
     def ref_expand(_logits, batch_id, ref_indptr, ref_indices):
         page_topk = torch.topk(_logits[:, :-1], k=topk).indices
-
+        _page_topk = page_topk.repeat_interleave(batch_size, dim=0)
         torch_union_overhead = np.median(
             bench_gpu_time(
-                lambda: torch.unique(page_topk.repeat_interleave(batch_size, dim=0)),
+                lambda: torch.unique(_page_topk),
                 dry_run_time_ms=100,
                 repeat_time_ms=1000,
+                # use_cuda_graph=True
             )
         )
 
@@ -123,10 +124,13 @@ def bench_topk(
     num_pages_per_req.add_(-1)
     num_pages = ceil_div(seq_len, page_size)
 
+    _logits = logits[:, :num_pages].contiguous()
+    logits = logits.contiguous()
+
     topk_overhead = np.median(
         bench_gpu_time(
             lambda: flashinfer.top_k(
-                input=logits[:, :num_pages].contiguous(),
+                input=_logits,
                 k=topk,
                 sorted=False,
             ),
@@ -135,6 +139,8 @@ def bench_topk(
             use_cuda_graph=True
         )
     )
+
+    torch.cuda.empty_cache()
 
     fused_topk_overhead = np.median(
         bench_gpu_time(
@@ -169,7 +175,7 @@ for dtype in [torch.bfloat16]:
     for page_size in [32]:
         for max_length in [32768]:
             for (num_kv_heads, num_qo_heads, sink_size) in [(8, 32, 4)]:
-                for batch_size in [8]:
+                for batch_size in [1, 2, 4, 8]:
                     for topk in [8, 16, 32, 64]:
                         for seq_len in [4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000]:
                             with torch.cuda.device(device):
