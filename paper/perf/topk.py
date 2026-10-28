@@ -8,6 +8,105 @@ device = "cuda:0"
 torch.manual_seed(42)
 
 
+def bench_gpu_time_topk_clean(
+        topk_fn,
+        clean_fn,
+        dry_run_iters=None,
+        repeat_iters=None,
+        dry_run_time_ms=25,
+        repeat_time_ms=100,
+        l2_flush=True,
+        l2_flush_size_mb=256,
+        l2_flush_device="cuda",
+):
+    if l2_flush:
+        buffer = torch.empty(
+            int(l2_flush_size_mb) * 1024 * 1024,
+            device=l2_flush_device,
+            dtype=torch.int8,
+        )
+
+    # Warmup
+    torch.cuda.synchronize()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        clean_fn()
+        for _ in range(3):
+            topk_fn()
+            clean_fn()
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    # Capture two independent CUDA Graphs
+    topk_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(topk_graph):
+        topk_fn()
+
+    clean_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(clean_graph):
+        clean_fn()
+
+    # Estimate execution time
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    start.record()
+    for _ in range(5):
+        if l2_flush:
+            buffer.zero_()
+        topk_graph.replay()
+        clean_graph.replay()
+    end.record()
+
+    torch.cuda.synchronize()
+    estimated_time = start.elapsed_time(end) / 5
+
+    if dry_run_iters is None:
+        dry_run_iters = max(1, int(dry_run_time_ms / estimated_time))
+    if repeat_iters is None:
+        repeat_iters = max(1, int(repeat_time_ms / estimated_time))
+
+    # Dry run
+    for _ in range(dry_run_iters):
+        if l2_flush:
+            buffer.zero_()
+        topk_graph.replay()
+        clean_graph.replay()
+    torch.cuda.synchronize()
+
+    # Actual run
+    topk_starts = [torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)]
+    topk_ends = [torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)]
+    clean_starts = [torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)]
+    clean_ends = [torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)]
+
+    for i in range(repeat_iters):
+        if l2_flush:
+            buffer.zero_()
+
+        topk_starts[i].record()
+        topk_graph.replay()
+        topk_ends[i].record()
+
+        clean_starts[i].record()
+        clean_graph.replay()
+        clean_ends[i].record()
+
+    torch.cuda.synchronize()
+
+    topk_times = [
+        topk_starts[i].elapsed_time(topk_ends[i])
+        for i in range(repeat_iters)
+    ]
+    clean_times = [
+        clean_starts[i].elapsed_time(clean_ends[i])
+        for i in range(repeat_iters)
+    ]
+
+    return topk_times, clean_times
+
+
 def bench_topk(
         dtype,
         topk,
@@ -101,8 +200,6 @@ def bench_topk(
         ref_indptr, ref_indices, torch_union_overhead = ref_expand(logits_, batch_idx, ref_indptr, ref_indices)
         logits[batch_idx * num_qo_heads:(batch_idx + 1) * num_qo_heads, :ceil_div(seq_len, page_size)] = logits_
 
-    logits.contiguous()
-
     mask_logits = torch.zeros(
         batch_size * num_kv_heads, max_num_pages,
         dtype=torch.int32,
@@ -142,31 +239,39 @@ def bench_topk(
 
     torch.cuda.empty_cache()
 
-    fused_topk_overhead = np.median(
-        bench_gpu_time(
-            lambda: flashinfer.topk_bool_mask_logits(
-                logits=logits,
-                mask_logits=mask_logits,
-                indptr=kv_indptr,
-                indices=kv_indices,
-                sparse_indptr=sparse_indptr,
-                sparse_indices=sparse_indices,
-                top_k=topk,
-                group_size=group_size,
-                num_pages_per_req=num_pages_per_req,
-                is_bench=True
-            ),
-            dry_run_time_ms=100,
-            repeat_time_ms=1000,
-            use_cuda_graph=True
+    def topk_fn():
+        flashinfer.topk_bool_mask_logits(
+            logits=logits,
+            mask_logits=mask_logits,
+            indptr=kv_indptr,
+            indices=kv_indices,
+            sparse_indptr=sparse_indptr,
+            sparse_indices=sparse_indices,
+            top_k=topk,
+            group_size=group_size,
+            num_pages_per_req=num_pages_per_req,
         )
+
+    def clean_fn():
+        sparse_indptr.zero_()
+        sparse_indices.zero_()
+        mask_logits.zero_()
+
+    topk_times, clean_times = bench_gpu_time_topk_clean(
+        topk_fn,
+        clean_fn,
+        dry_run_time_ms=100,
+        repeat_time_ms=1000,
     )
+
+    fused_topk_overhead = np.median(topk_times)
+    clean_overhead = np.median(clean_times)
 
     print("=" * 10)
     print(f"Batch Size: {batch_size}, TopK: {topk}, Seq Len: {seq_len + 4}")
     print(f"Torch Union Overhead: {torch_union_overhead * 1e3:.2f}us")
     print(f"TopK Overhead: {topk_overhead * 1e3:.2f}us")
-    print(f"Fused TopK Overhead: {fused_topk_overhead * 1e3:.2f}us")
+    print(f"Fused TopK Overhead: {(fused_topk_overhead - clean_overhead) * 1e3:.2f}us")
 
     torch.cuda.empty_cache()
 
